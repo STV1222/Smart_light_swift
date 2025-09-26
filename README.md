@@ -20,6 +20,7 @@ A powerful **Retrieval-Augmented Generation (RAG)** application built with Swift
 - **Automatic Citations**: Sources are automatically attributed with clickable references
 - **General Knowledge**: Falls back to general AI responses when no relevant documents found
 - **Session Management**: Maintains conversation history
+- **Loading States**: Visual feedback during processing
 
 ### 🔧 **Advanced Configuration**
 - **Environment Variables**: Secure API key management via `.env` files
@@ -98,7 +99,7 @@ User Input → Text Chunking → Local Embeddings → Vector Storage → Similar
 ### **Indexing Documents**
 - Click the **Settings** button (⚙️) in the chat interface
 - Select **"Index folders…"** to choose directories
-- Monitor progress with the built-in progress bar
+- Monitor progress with the built-in progress bar and stage indicators
 - View indexed file count and folder list
 
 ### **Asking Questions**
@@ -181,13 +182,15 @@ LOCAL_EMBEDDING_MODEL=google/embeddinggemma-300m
 ```
 Smart Light-Swift/
 ├── Smart Light-Swift/
-│   ├── ChatView.swift          # Main chat interface
-│   ├── RagEngine.swift         # Core RAG logic
-│   ├── Indexer.swift           # Document processing
+│   ├── ChatView.swift              # Main chat interface
+│   ├── RagEngine.swift             # Core RAG logic
+│   ├── Indexer.swift               # Document processing
 │   ├── LocalEmbeddingService.swift # Python subprocess
-│   ├── OpenAIService.swift     # GPT-5 integration
-│   ├── VectorStore.swift       # In-memory storage
-│   ├── SettingsView.swift      # Configuration UI
+│   ├── OpenAIService.swift         # GPT-5 integration
+│   ├── VectorStore.swift           # In-memory storage
+│   ├── SettingsView.swift          # Configuration UI
+│   ├── PersistentEmbeddingService.swift # Optimized embeddings
+│   ├── IncrementalIndexer.swift    # Advanced indexing
 │   └── ...
 ├── Smart Light-Swift.xcodeproj/
 └── README.md
