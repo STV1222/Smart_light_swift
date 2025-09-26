@@ -22,7 +22,10 @@ final class IncrementalIndexer {
     private let storeQueue = DispatchQueue(label: "store.access", qos: .userInitiated)
     
     // Batch processing
-    private let maxBatchSize = 50
+    private let maxBatchSize = 20 // Reduced from 50 to prevent large batches
+    
+    // Large file handling
+    private let maxChunksPerFile = 100 // Limit chunks per file to prevent overwhelming the system
     
     init(embedder: EmbeddingService, store: InMemoryVectorStore) {
         self.embedder = embedder
@@ -55,6 +58,11 @@ final class IncrementalIndexer {
             while let rel = (en?.nextObject() as? String) {
                 let path = (folder as NSString).appendingPathComponent(rel)
                 let ext = (rel as NSString).pathExtension.lowercased()
+                
+                // Skip virtual environment and build directories
+                if shouldSkipFile(path) {
+                    continue
+                }
                 
                 if isSupportedFile(ext: ext) {
                     totalFiles += 1
@@ -236,7 +244,7 @@ final class IncrementalIndexer {
                     fileProgressLock.lock()
                     processedFiles += 1
                     let now = Date()
-                    let shouldUpdate = now.timeIntervalSince(lastProgressUpdate) > 0.5 // Update every 500ms max
+                    let shouldUpdate = now.timeIntervalSince(lastProgressUpdate) > 0.2 // Update every 200ms for better responsiveness
                     
                     if shouldUpdate {
                         let fileProgress = Double(processedFiles) / Double(files.count)
@@ -770,16 +778,73 @@ except Exception as e:
         let fileExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
         
         // Different chunking strategies based on file type
+        var chunks: [String]
         switch fileExtension {
         case "pdf", "docx", "pptx":
-            return chunkDocument(text: text, fileName: fileName)
+            chunks = chunkDocument(text: text, fileName: fileName)
         case "py", "js", "ts", "java", "cpp", "c", "h", "swift":
-            return chunkCode(text: text, fileName: fileName)
+            chunks = chunkCode(text: text, fileName: fileName)
         case "md", "txt", "rtf":
-            return chunkText(text: text, fileName: fileName)
+            chunks = chunkText(text: text, fileName: fileName)
+        case "csv":
+            chunks = chunkCSV(text: text, fileName: fileName)
         default:
-            return chunkGeneric(text: text, fileName: fileName)
+            chunks = chunkGeneric(text: text, fileName: fileName)
         }
+        
+        // Limit chunks per file to prevent overwhelming the system
+        if chunks.count > maxChunksPerFile {
+            print("[IncrementalIndexer] Large file detected: \(fileName) with \(chunks.count) chunks, limiting to \(maxChunksPerFile)")
+            chunks = Array(chunks.prefix(maxChunksPerFile))
+        }
+        
+        return chunks
+    }
+    
+    private func chunkCSV(text: String, fileName: String) -> [String] {
+        // CSV-specific chunking - sample data intelligently
+        let lines = text.components(separatedBy: .newlines)
+        var chunks: [String] = []
+        
+        // Always include header if present
+        if !lines.isEmpty {
+            let header = lines[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !header.isEmpty {
+                chunks.append(buildChunk(content: "Header: \(header)", fileName: fileName, type: "csv-header"))
+            }
+        }
+        
+        // Sample data rows intelligently (every nth row to get good coverage)
+        let dataLines = Array(lines.dropFirst()) // Skip header
+        let sampleSize = min(50, dataLines.count) // Sample up to 50 rows
+        let step = max(1, dataLines.count / sampleSize)
+        
+        var sampledRows: [String] = []
+        for i in stride(from: 0, to: dataLines.count, by: step) {
+            let line = dataLines[i].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !line.isEmpty {
+                sampledRows.append(line)
+            }
+        }
+        
+        // Create chunks from sampled data
+        let chunkSize = 10 // 10 rows per chunk
+        for i in stride(from: 0, to: sampledRows.count, by: chunkSize) {
+            let endIndex = min(i + chunkSize, sampledRows.count)
+            let chunkRows = Array(sampledRows[i..<endIndex])
+            let chunkContent = "Data rows \(i+1)-\(endIndex):\n" + chunkRows.joined(separator: "\n")
+            chunks.append(buildChunk(content: chunkContent, fileName: fileName, type: "csv-data"))
+        }
+        
+        // If we have very few chunks, add a summary
+        if chunks.count < 3 && dataLines.count > 0 {
+            let totalRows = dataLines.count
+            let summary = "CSV Summary: \(totalRows) total data rows, \(lines[0].components(separatedBy: ",").count) columns"
+            chunks.append(buildChunk(content: summary, fileName: fileName, type: "csv-summary"))
+        }
+        
+        print("[IncrementalIndexer] CSV chunking: \(lines.count) total lines, \(chunks.count) chunks created")
+        return chunks
     }
     
     private func chunkDocument(text: String, fileName: String) -> [String] {
@@ -975,6 +1040,34 @@ except Exception as e:
         """
     }
     
+    
+    private func shouldSkipFile(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let fileName = url.lastPathComponent
+        let pathComponents = url.pathComponents
+        
+        // Skip hidden files and system files
+        if fileName.hasPrefix(".") || fileName.hasPrefix("~") {
+            return true
+        }
+        
+        // Skip virtual environment directories and common build/cache directories
+        if pathComponents.contains(".venv") || 
+           pathComponents.contains("venv") ||
+           pathComponents.contains("__pycache__") ||
+           pathComponents.contains("node_modules") ||
+           pathComponents.contains(".git") ||
+           pathComponents.contains("build") ||
+           pathComponents.contains("dist") ||
+           pathComponents.contains(".pytest_cache") ||
+           pathComponents.contains(".mypy_cache") ||
+           pathComponents.contains(".DS_Store") ||
+           pathComponents.contains("Thumbs.db") {
+            return true
+        }
+        
+        return false
+    }
     
     private func shouldForceReindexing() -> Bool {
         // Force re-indexing if we have very few chunks (indicating old chunking strategy)

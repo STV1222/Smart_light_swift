@@ -50,6 +50,10 @@ final class RagSession {
         print("[RagSession] Resetting store for fresh indexing")
         store.reset()
     }
+    
+    func getStoreCount() -> Int {
+        return store.count
+    }
 }
 
 
