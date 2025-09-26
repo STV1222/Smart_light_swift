@@ -14,17 +14,23 @@ struct VectorChunk: Identifiable, Codable, Equatable {
     let embedding: [Float]
 }
 
-final class InMemoryVectorStore {
+final class InMemoryVectorStore: @unchecked Sendable {
     private(set) var chunks: [DocumentChunk] = []
     private let dim: Int
+    private let storeId = UUID()
 
-    init(dimension: Int) { self.dim = dimension }
+    init(dimension: Int) { 
+        self.dim = dimension
+        print("[VectorStore] Created new store with ID: \(storeId)")
+    }
     
     var count: Int { chunks.count }
     var dimension: Int { dim }
 
     func add(path: String, text: String, embedding: [Float]) {
-        chunks.append(DocumentChunk(id: UUID(), path: path, text: text, embedding: embedding))
+        let chunk = DocumentChunk(id: UUID(), path: path, text: text, embedding: embedding)
+        chunks.append(chunk)
+        print("[VectorStore] Added chunk: \(path) (total: \(chunks.count)) to store \(storeId)")
     }
 
     func reset() { chunks.removeAll(keepingCapacity: false) }

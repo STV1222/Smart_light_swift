@@ -18,6 +18,7 @@ struct QAItem: Identifiable, Equatable {
 final class ChatViewModel: ObservableObject {
     @Published var items: [QAItem] = []
     @Published var input: String = ""
+    @Published var isLoading: Bool = false
     private let engine: RagEngine = {
         if RagSession.shared.engine == nil {
             // Always use Gemma embeddings
@@ -30,11 +31,23 @@ final class ChatViewModel: ObservableObject {
         let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
         input = ""
+        
+        // Set loading state
+        await MainActor.run {
+            isLoading = true
+        }
+        
         do {
             let ans = try await engine.answer(question: q)
-            items.append(QAItem(question: q, answer: ans))
+            await MainActor.run {
+                items.append(QAItem(question: q, answer: ans))
+                isLoading = false
+            }
         } catch {
-            items.append(QAItem(question: q, answer: "Error: \(error.localizedDescription)"))
+            await MainActor.run {
+                items.append(QAItem(question: q, answer: "Error: \(error.localizedDescription)"))
+                isLoading = false
+            }
         }
     }
 }

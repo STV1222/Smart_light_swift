@@ -6,7 +6,7 @@
 import Foundation
 
 // Local embedding service that runs Python script in subprocess
-final class LocalEmbeddingService: EmbeddingService {
+final class LocalEmbeddingService: @unchecked Sendable, EmbeddingService {
     private let modelName: String
     private let pythonScript: String
     private(set) var dimension: Int = 768
@@ -99,7 +99,7 @@ except Exception as e:
         try? FileManager.default.removeItem(atPath: pythonScript)
     }
     
-    func embed(texts: [String], asQuery: Bool = false) throws -> [[Float]] {
+    func embed(texts: [String], asQuery: Bool = false, progress: ((Double) -> Void)? = nil) throws -> [[Float]] {
         print("[LocalEmbeddingService] Embedding \(texts.count) texts (asQuery: \(asQuery))")
         let process = Process()
         
@@ -146,7 +146,7 @@ except Exception as e:
         ]
         
         for fileURL in candidateEnvFiles {
-            if let content = try? String(contentsOf: fileURL),
+            if let content = try? String(contentsOf: fileURL, encoding: .utf8),
                let loaded = parseDotEnv(content), !loaded.isEmpty {
                 loaded.forEach { env[$0.key] = $0.value }
             }

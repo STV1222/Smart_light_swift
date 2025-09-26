@@ -17,9 +17,19 @@ struct Smart_Light_SwiftApp: App {
                 .onAppear {
                     EnvDiagnostics.verifyAndLog()
                     // Local mode: no server startup
+                    
+                    // Debug: Test the new optimized system (disabled for now)
+                    #if DEBUG && false
+                    Task {
+                        print("🔍 [Debug] Testing optimized system on app startup...")
+                        DebugHelper.testPersistentEmbeddingService()
+                    }
+                    #endif
                 }
                 .onDisappear { server.stop() }
         }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
         Settings { SettingsView() }   // Cmd+, opens this
     }
 }

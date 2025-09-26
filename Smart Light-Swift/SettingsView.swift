@@ -20,11 +20,26 @@ struct SettingsView: View {
     @State private var chunks: Int = 0
     @State private var showProgress: Bool = false
     @State private var progress: Double = 0
+    @State private var progressStage: String = "Starting..."
     @State private var cancelIndexing = false
     // HTTP server disabled; keep local-only pipeline
     // Local pipeline
     @State private var engine: RagEngine? = nil
-    @State private var indexer: Indexer? = nil
+    @State private var indexer: IndexerProtocol? = nil
+    
+    private var progressStageText: String {
+        if progress < 0.1 {
+            return "Discovering files..."
+        } else if progress < 0.9 {
+            return "Processing files..."
+        } else if progress < 0.95 {
+            return "Finalizing..."
+        } else if progress < 1.0 {
+            return "Completing..."
+        } else {
+            return "Complete!"
+        }
+    }
     @State private var store: InMemoryVectorStore? = nil
     // Env diagnostics
     @State private var envBackend: String = ""
@@ -45,8 +60,8 @@ struct SettingsView: View {
             Section("RAG Index") {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Button(indexing ? "Indexing…" : "Index folders…") { Task { await pickAndIndex() } }
-                            .disabled(indexing)
+                Button(indexing ? "Indexing…" : "Index folders…") { Task { await pickAndIndex() } }
+                    .disabled(indexing)
                         
                         if indexing {
                             Button("Cancel") {
@@ -58,12 +73,21 @@ struct SettingsView: View {
                     }
                     
                     if showProgress {
-                        ProgressView(value: progress, total: 1.0) {
-                            Text("Indexing…")
-                        } currentValueLabel: {
-                            Text("\(Int(progress * 100))%")
+                        VStack(alignment: .leading, spacing: 4) {
+                            ProgressView(value: progress, total: 1.0) {
+                                Text("Indexing…")
+                            } currentValueLabel: {
+                                Text("\(Int(progress * 100))%")
+                            }
+                            .progressViewStyle(.linear)
+                            .animation(.easeInOut(duration: 0.3), value: progress)
+                            
+                            // Show progress stage
+                            Text(progressStageText)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .animation(.easeInOut(duration: 0.3), value: progressStageText)
                         }
-                        .progressViewStyle(.linear)
                     }
                     if !foldersIndexed.isEmpty {
                         Text("Indexed folders:").font(.subheadline).bold()
@@ -107,6 +131,7 @@ struct SettingsView: View {
         indexing = true
         showProgress = true
         progress = 0
+        progressStage = "Starting..."
         cancelIndexing = false
         let folders = panel.urls.map { $0.path }
         
@@ -120,7 +145,7 @@ struct SettingsView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 // Hard reset behavior like Python 'replace=True'
-                RagSession.shared.store.reset()
+                RagSession.shared.resetStore()
                 
                 // Check for cancellation before starting
                 if self.cancelIndexing {
@@ -133,7 +158,21 @@ struct SettingsView: View {
                 try ix.index(folders: folders, 
                             progress: { p in
                                 DispatchQueue.main.async { 
+                                    print("[SettingsView] Progress callback received: \(Int(p * 100))%")
                                     self.progress = max(min(p, 1.0), 0.0)
+                                    // Update stage based on progress
+                                    if p < 0.1 {
+                                        self.progressStage = "Discovering files..."
+                                    } else if p < 0.9 {
+                                        self.progressStage = "Processing files..."
+                                    } else if p < 0.95 {
+                                        self.progressStage = "Finalizing..."
+                                    } else if p < 1.0 {
+                                        self.progressStage = "Completing..."
+                                    } else {
+                                        self.progressStage = "Complete!"
+                                    }
+                                    print("[SettingsView] Progress updated to: \(Int(self.progress * 100))% - \(self.progressStage)")
                                 }
                             },
                             shouldCancel: {
@@ -151,11 +190,14 @@ struct SettingsView: View {
                 DispatchQueue.main.async {
                     self.progress = 1.0
                     self.foldersIndexed = folders
-                    self.chunks = RagSession.shared.store.count
+                    // Force a synchronous read of the store count
+                    let finalChunks = RagSession.shared.store.count
+                    self.chunks = finalChunks
+                    print("[SettingsView] Indexing completed. Final chunk count: \(finalChunks)")
                     self.indexing = false
                     self.showProgress = false
                 }
-            } catch {
+        } catch {
                 DispatchQueue.main.async {
                     if let nsError = error as NSError?, nsError.code == -999 {
                         // This is a cancellation error, handle it gracefully

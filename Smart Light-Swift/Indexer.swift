@@ -60,7 +60,7 @@ final class Indexer {
                     throw NSError(domain: "Indexer", code: -999, userInfo: [NSLocalizedDescriptionKey: "Indexing cancelled by user"])
                 }
                 
-                let embs = try embedder.embed(texts: chunks, asQuery: false)
+                let embs = try embedder.embed(texts: chunks, asQuery: false, progress: nil)
                 print("[Indexer] Generated \(embs.count) embeddings for \(f)")
                 for (i, e) in embs.enumerated() { 
                     let chunkPath = f + "#p\(i)"

@@ -8,8 +8,8 @@ import Foundation
 import PythonKit
 #endif
 
-protocol EmbeddingService {
-    func embed(texts: [String], asQuery: Bool) throws -> [[Float]]
+protocol EmbeddingService: Sendable {
+    func embed(texts: [String], asQuery: Bool, progress: ((Double) -> Void)?) throws -> [[Float]]
     var dimension: Int { get }
 }
 

@@ -26,7 +26,7 @@ struct OpenAIService {
             input = "Using this context, answer the user. If the context is irrelevant, answer generally.\n\nContext:\n\(context)\n\nUser: \(message)"
         }
 
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "model": "gpt-5-nano",
             "input": input,
             "max_output_tokens": maxOutputTokens,
