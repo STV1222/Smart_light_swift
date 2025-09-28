@@ -22,10 +22,7 @@ final class IncrementalIndexer {
     private let storeQueue = DispatchQueue(label: "store.access", qos: .userInitiated)
     
     // Batch processing
-    private let maxBatchSize = 20 // Reduced from 50 to prevent large batches
-    
-    // Large file handling
-    private let maxChunksPerFile = 100 // Limit chunks per file to prevent overwhelming the system
+    private let maxBatchSize = 50
     
     init(embedder: EmbeddingService, store: InMemoryVectorStore) {
         self.embedder = embedder
@@ -59,12 +56,8 @@ final class IncrementalIndexer {
                 let path = (folder as NSString).appendingPathComponent(rel)
                 let ext = (rel as NSString).pathExtension.lowercased()
                 
-                // Skip virtual environment and build directories
-                if shouldSkipFile(path) {
-                    continue
-                }
-                
-                if isSupportedFile(ext: ext) {
+                // Apply smart file filtering
+                if isSupportedFile(ext: ext) && !shouldExcludeFile(path: path) {
                     totalFiles += 1
                     
                     // If this is a new folder selection OR force re-indexing, process ALL files
@@ -72,6 +65,10 @@ final class IncrementalIndexer {
                     if isNewFolderSelection || shouldForceReindex || shouldProcessFile(path: path) {
                         filesToProcess.append(path)
                     }
+                } else if shouldExcludeFile(path: path) {
+                    print("[IncrementalIndexer] Excluding file: \(path)")
+                } else {
+                    print("[IncrementalIndexer] Skipping unsupported file: \(path)")
                 }
             }
         }
@@ -90,8 +87,8 @@ final class IncrementalIndexer {
             return
         }
         
-        // Process files in parallel batches
-        let batches = filesToProcess.chunked(into: maxBatchSize)
+        // Process files in parallel batches with size-aware batching
+        let batches = createSizeAwareBatches(files: filesToProcess)
         let totalBatches = batches.count
         
         print("[IncrementalIndexer] Processing \(filesToProcess.count) files in \(totalBatches) batches")
@@ -244,7 +241,7 @@ final class IncrementalIndexer {
                     fileProgressLock.lock()
                     processedFiles += 1
                     let now = Date()
-                    let shouldUpdate = now.timeIntervalSince(lastProgressUpdate) > 0.2 // Update every 200ms for better responsiveness
+                    let shouldUpdate = now.timeIntervalSince(lastProgressUpdate) > 0.5 // Update every 500ms max
                     
                     if shouldUpdate {
                         let fileProgress = Double(processedFiles) / Double(files.count)
@@ -776,75 +773,28 @@ except Exception as e:
         // Advanced semantic chunking strategy for maximum quality
         let fileName = URL(fileURLWithPath: path).lastPathComponent
         let fileExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
+        let textLength = text.count
         
-        // Different chunking strategies based on file type
-        var chunks: [String]
+        // Smart chunking based on file size and type
+        if textLength > 1_000_000 { // Files over 1MB
+            print("[IncrementalIndexer] Large file detected (\(textLength) chars) - using optimized chunking")
+            return chunkLargeFile(text: text, fileName: fileName, fileExtension: fileExtension)
+        } else if textLength > 500_000 { // Files over 500KB
+            print("[IncrementalIndexer] Medium-large file detected (\(textLength) chars) - using conservative chunking")
+            return chunkMediumFile(text: text, fileName: fileName, fileExtension: fileExtension)
+        }
+        
+        // Different chunking strategies based on file type for normal-sized files
         switch fileExtension {
         case "pdf", "docx", "pptx":
-            chunks = chunkDocument(text: text, fileName: fileName)
+            return chunkDocument(text: text, fileName: fileName)
         case "py", "js", "ts", "java", "cpp", "c", "h", "swift":
-            chunks = chunkCode(text: text, fileName: fileName)
+            return chunkCode(text: text, fileName: fileName)
         case "md", "txt", "rtf":
-            chunks = chunkText(text: text, fileName: fileName)
-        case "csv":
-            chunks = chunkCSV(text: text, fileName: fileName)
+            return chunkText(text: text, fileName: fileName)
         default:
-            chunks = chunkGeneric(text: text, fileName: fileName)
+            return chunkGeneric(text: text, fileName: fileName)
         }
-        
-        // Limit chunks per file to prevent overwhelming the system
-        if chunks.count > maxChunksPerFile {
-            print("[IncrementalIndexer] Large file detected: \(fileName) with \(chunks.count) chunks, limiting to \(maxChunksPerFile)")
-            chunks = Array(chunks.prefix(maxChunksPerFile))
-        }
-        
-        return chunks
-    }
-    
-    private func chunkCSV(text: String, fileName: String) -> [String] {
-        // CSV-specific chunking - sample data intelligently
-        let lines = text.components(separatedBy: .newlines)
-        var chunks: [String] = []
-        
-        // Always include header if present
-        if !lines.isEmpty {
-            let header = lines[0].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !header.isEmpty {
-                chunks.append(buildChunk(content: "Header: \(header)", fileName: fileName, type: "csv-header"))
-            }
-        }
-        
-        // Sample data rows intelligently (every nth row to get good coverage)
-        let dataLines = Array(lines.dropFirst()) // Skip header
-        let sampleSize = min(50, dataLines.count) // Sample up to 50 rows
-        let step = max(1, dataLines.count / sampleSize)
-        
-        var sampledRows: [String] = []
-        for i in stride(from: 0, to: dataLines.count, by: step) {
-            let line = dataLines[i].trimmingCharacters(in: .whitespacesAndNewlines)
-            if !line.isEmpty {
-                sampledRows.append(line)
-            }
-        }
-        
-        // Create chunks from sampled data
-        let chunkSize = 10 // 10 rows per chunk
-        for i in stride(from: 0, to: sampledRows.count, by: chunkSize) {
-            let endIndex = min(i + chunkSize, sampledRows.count)
-            let chunkRows = Array(sampledRows[i..<endIndex])
-            let chunkContent = "Data rows \(i+1)-\(endIndex):\n" + chunkRows.joined(separator: "\n")
-            chunks.append(buildChunk(content: chunkContent, fileName: fileName, type: "csv-data"))
-        }
-        
-        // If we have very few chunks, add a summary
-        if chunks.count < 3 && dataLines.count > 0 {
-            let totalRows = dataLines.count
-            let summary = "CSV Summary: \(totalRows) total data rows, \(lines[0].components(separatedBy: ",").count) columns"
-            chunks.append(buildChunk(content: summary, fileName: fileName, type: "csv-summary"))
-        }
-        
-        print("[IncrementalIndexer] CSV chunking: \(lines.count) total lines, \(chunks.count) chunks created")
-        return chunks
     }
     
     private func chunkDocument(text: String, fileName: String) -> [String] {
@@ -1040,34 +990,88 @@ except Exception as e:
         """
     }
     
+    // MARK: - Large File Chunking Strategies
     
-    private func shouldSkipFile(_ path: String) -> Bool {
-        let url = URL(fileURLWithPath: path)
-        let fileName = url.lastPathComponent
-        let pathComponents = url.pathComponents
+    private func chunkLargeFile(text: String, fileName: String, fileExtension: String) -> [String] {
+        // For very large files (>1MB), use aggressive chunking to prevent memory issues
+        print("[IncrementalIndexer] Using large file chunking strategy for \(fileName)")
         
-        // Skip hidden files and system files
-        if fileName.hasPrefix(".") || fileName.hasPrefix("~") {
-            return true
+        let lines = text.components(separatedBy: .newlines)
+        var chunks: [String] = []
+        var currentChunk = ""
+        let maxChunkLength = 2000 // Smaller chunks for large files
+        let maxChunks = 200 // Limit total chunks to prevent memory issues
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            
+            if currentChunk.count + trimmed.count > maxChunkLength && !currentChunk.isEmpty {
+                chunks.append(buildChunk(content: currentChunk, fileName: fileName, type: "large-file"))
+                currentChunk = trimmed
+                
+                // Stop if we've reached the chunk limit
+                if chunks.count >= maxChunks {
+                    print("[IncrementalIndexer] Reached chunk limit (\(maxChunks)) for large file \(fileName)")
+                    break
+                }
+            } else {
+                if !currentChunk.isEmpty {
+                    currentChunk += "\n" + trimmed
+                } else {
+                    currentChunk = trimmed
+                }
+            }
         }
         
-        // Skip virtual environment directories and common build/cache directories
-        if pathComponents.contains(".venv") || 
-           pathComponents.contains("venv") ||
-           pathComponents.contains("__pycache__") ||
-           pathComponents.contains("node_modules") ||
-           pathComponents.contains(".git") ||
-           pathComponents.contains("build") ||
-           pathComponents.contains("dist") ||
-           pathComponents.contains(".pytest_cache") ||
-           pathComponents.contains(".mypy_cache") ||
-           pathComponents.contains(".DS_Store") ||
-           pathComponents.contains("Thumbs.db") {
-            return true
+        // Add final chunk if it has content
+        if !currentChunk.isEmpty && chunks.count < maxChunks {
+            chunks.append(buildChunk(content: currentChunk, fileName: fileName, type: "large-file"))
         }
         
-        return false
+        print("[IncrementalIndexer] Created \(chunks.count) chunks for large file \(fileName)")
+        return chunks
     }
+    
+    private func chunkMediumFile(text: String, fileName: String, fileExtension: String) -> [String] {
+        // For medium-large files (500KB-1MB), use conservative chunking
+        print("[IncrementalIndexer] Using medium file chunking strategy for \(fileName)")
+        
+        let lines = text.components(separatedBy: .newlines)
+        var chunks: [String] = []
+        var currentChunk = ""
+        let maxChunkLength = 3000 // Medium-sized chunks
+        let maxChunks = 150 // Moderate chunk limit
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            
+            if currentChunk.count + trimmed.count > maxChunkLength && !currentChunk.isEmpty {
+                chunks.append(buildChunk(content: currentChunk, fileName: fileName, type: "medium-file"))
+                currentChunk = trimmed
+                
+                if chunks.count >= maxChunks {
+                    print("[IncrementalIndexer] Reached chunk limit (\(maxChunks)) for medium file \(fileName)")
+                    break
+                }
+            } else {
+                if !currentChunk.isEmpty {
+                    currentChunk += "\n" + trimmed
+                } else {
+                    currentChunk = trimmed
+                }
+            }
+        }
+        
+        if !currentChunk.isEmpty && chunks.count < maxChunks {
+            chunks.append(buildChunk(content: currentChunk, fileName: fileName, type: "medium-file"))
+        }
+        
+        print("[IncrementalIndexer] Created \(chunks.count) chunks for medium file \(fileName)")
+        return chunks
+    }
+    
     
     private func shouldForceReindexing() -> Bool {
         // Force re-indexing if we have very few chunks (indicating old chunking strategy)
@@ -1099,6 +1103,648 @@ except Exception as e:
         }
         
         return isSame
+    }
+    
+    // MARK: - Size-Aware Batching
+    
+    private func createSizeAwareBatches(files: [String]) -> [[String]] {
+        var batches: [[String]] = []
+        var currentBatch: [String] = []
+        var currentBatchSize: Int64 = 0
+        let maxBatchSizeBytes: Int64 = 10 * 1024 * 1024 // 10MB per batch
+        let maxFilesPerBatch = 20 // Maximum files per batch
+        
+        for file in files {
+            let fileSize = getFileSize(file)
+            
+            // If adding this file would exceed limits, start a new batch
+            if (!currentBatch.isEmpty && 
+                (currentBatchSize + fileSize > maxBatchSizeBytes || currentBatch.count >= maxFilesPerBatch)) {
+                batches.append(currentBatch)
+                currentBatch = []
+                currentBatchSize = 0
+            }
+            
+            currentBatch.append(file)
+            currentBatchSize += fileSize
+        }
+        
+        // Add the last batch if it has files
+        if !currentBatch.isEmpty {
+            batches.append(currentBatch)
+        }
+        
+        print("[IncrementalIndexer] Created \(batches.count) size-aware batches")
+        return batches
+    }
+    
+    private func getFileSize(_ path: String) -> Int64 {
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            return (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        } catch {
+            return 0
+        }
+    }
+    
+    // MARK: - Smart File Filtering
+    
+    private func shouldExcludeFile(path: String) -> Bool {
+        let fileName = (path as NSString).lastPathComponent
+        
+        // Exclude hidden files and directories
+        if fileName.hasPrefix(".") {
+            print("[IncrementalIndexer] Excluding hidden file: \(path)")
+            return true
+        }
+        
+        // Exclude temporary Word files (created when Word documents are open)
+        if fileName.hasPrefix("~$") {
+            print("[IncrementalIndexer] Excluding temporary Word file: \(path)")
+            return true
+        }
+        
+        // Check file size and exclude extremely large files that might cause memory issues
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            if let fileSize = attributes[.size] as? NSNumber {
+                let sizeInMB = fileSize.doubleValue / (1024 * 1024)
+                if sizeInMB > 50 { // Exclude files larger than 50MB
+                    print("[IncrementalIndexer] Excluding very large file (\(String(format: "%.1f", sizeInMB))MB): \(path)")
+                    return true
+                } else if sizeInMB > 10 { // Warn about large files
+                    print("[IncrementalIndexer] Large file detected (\(String(format: "%.1f", sizeInMB))MB): \(path)")
+                }
+            }
+        } catch {
+            // If we can't get file size, continue processing
+            print("[IncrementalIndexer] Could not get file size for \(path): \(error)")
+        }
+        
+        // Exclude any path containing virtual environment directories
+        if path.contains("/.venv") || path.contains("/venv") || path.contains("\\.venv") || path.contains("\\venv") {
+            print("[IncrementalIndexer] Excluding virtual environment file: \(path)")
+            return true
+        }
+        
+        // Exclude any path containing Python package directories
+        if path.contains("/site-packages/") || path.contains("\\site-packages\\") {
+            print("[IncrementalIndexer] Excluding site-packages file: \(path)")
+            return true
+        }
+        
+        // Exclude any path containing node_modules
+        if path.contains("/node_modules/") || path.contains("\\node_modules\\") {
+            print("[IncrementalIndexer] Excluding node_modules file: \(path)")
+            return true
+        }
+        
+        // Exclude iOS/mobile dependency directories
+        if path.contains("/Pods/") || path.contains("\\Pods\\") {
+            print("[IncrementalIndexer] Excluding iOS Pods file: \(path)")
+            return true
+        }
+        
+        // Exclude other mobile dependency directories
+        if path.contains("/android/") || path.contains("\\android\\") || path.contains("/ios/") || path.contains("\\ios\\") {
+            print("[IncrementalIndexer] Excluding mobile platform file: \(path)")
+            return true
+        }
+        
+        // Exclude all common dependency and third-party directories
+        let dependencyPatterns = [
+            "/vendor/", "\\vendor\\",           // PHP Composer, Go modules
+            "/bower_components/", "\\bower_components\\", // Bower
+            "/jspm_packages/", "\\jspm_packages\\", // JSPM
+            "/packages/", "\\packages\\",       // Various package managers
+            "/external/", "\\external\\",       // External dependencies
+            "/third_party/", "\\third_party\\", // Third-party code
+            "/third-party/", "\\third-party\\", // Third-party code
+            "/dependencies/", "\\dependencies\\", // Dependencies
+            "/deps/", "\\deps\\",               // Dependencies
+            "/libs/", "\\libs\\",               // Libraries
+            "/libraries/", "\\libraries\\",     // Libraries
+            "/frameworks/", "\\frameworks\\",   // Frameworks
+            "/components/", "\\components\\",   // Component libraries
+            "/modules/", "\\modules\\",         // Module dependencies
+            "/plugins/", "\\plugins\\",         // Plugin directories
+            "/extensions/", "\\extensions\\",   // Extensions
+            "/addons/", "\\addons\\",           // Add-ons
+            "/widgets/", "\\widgets\\",         // Widgets
+            "/themes/", "\\themes\\",           // Themes
+            "/assets/", "\\assets\\",           // Asset directories
+            "/static/", "\\static\\",           // Static files
+            "/public/", "\\public\\",           // Public files
+            "/resources/", "\\resources\\",     // Resources
+            "/media/", "\\media\\",             // Media files
+            "/images/", "\\images\\",           // Images
+            "/css/", "\\css\\",                 // CSS files
+            "/js/", "\\js\\",                   // JavaScript files
+            "/fonts/", "\\fonts\\",             // Font files
+            "/icons/", "\\icons\\",             // Icons
+            "/sounds/", "\\sounds\\",           // Sound files
+            "/videos/", "\\videos\\",           // Video files
+            "/docs/", "\\docs\\",               // Documentation
+            "/documentation/", "\\documentation\\", // Documentation
+            "/examples/", "\\examples\\",       // Examples
+            "/samples/", "\\samples\\",         // Samples
+            "/tests/", "\\tests\\",             // Test files
+            "/test/", "\\test\\",               // Test files
+            "/spec/", "\\spec\\",               // Test specs
+            "/specs/", "\\specs\\",             // Test specs
+            "/fixtures/", "\\fixtures\\",       // Test fixtures
+            "/mocks/", "\\mocks\\",             // Test mocks
+            "/stubs/", "\\stubs\\",             // Test stubs
+            "/benchmarks/", "\\benchmarks\\",   // Benchmarks
+            "/performance/", "\\performance\\", // Performance tests
+            "/integration/", "\\integration\\", // Integration tests
+            "/e2e/", "\\e2e\\",                 // End-to-end tests
+            "/cypress/", "\\cypress\\",         // Cypress tests
+            "/playwright/", "\\playwright\\",   // Playwright tests
+            "/jest/", "\\jest\\",               // Jest tests
+            "/mocha/", "\\mocha\\",             // Mocha tests
+            "/karma/", "\\karma\\",             // Karma tests
+            "/jasmine/", "\\jasmine\\",         // Jasmine tests
+            "/protractor/", "\\protractor\\",   // Protractor tests
+            "/selenium/", "\\selenium\\",       // Selenium tests
+            "/webdriver/", "\\webdriver\\",     // WebDriver tests
+            "/nightwatch/", "\\nightwatch\\",   // Nightwatch tests
+            "/puppeteer/", "\\puppeteer\\",     // Puppeteer tests
+            "/storybook/", "\\storybook\\",     // Storybook
+            "/stories/", "\\stories\\",         // Stories
+            "/.storybook/", "\\.storybook\\",   // Storybook config
+            "/.docusaurus/", "\\.docusaurus\\", // Docusaurus
+            "/.next/", "\\.next\\",             // Next.js build
+            "/.nuxt/", "\\.nuxt\\",             // Nuxt.js build
+            "/.vuepress/", "\\.vuepress\\",     // VuePress
+            "/.vitepress/", "\\.vitepress\\",   // VitePress
+            "/.gatsby/", "\\.gatsby\\",         // Gatsby
+            "/.svelte/", "\\.svelte\\",         // Svelte
+            "/.angular/", "\\.angular\\",       // Angular
+            "/.react/", "\\.react\\",           // React
+            "/.vue/", "\\.vue\\",               // Vue
+            "/.ember/", "\\.ember\\",           // Ember
+            "/.backbone/", "\\.backbone\\",     // Backbone
+            "/.jquery/", "\\.jquery\\",         // jQuery
+            "/.lodash/", "\\.lodash\\",         // Lodash
+            "/.underscore/", "\\.underscore\\", // Underscore
+            "/.moment/", "\\.moment\\",         // Moment.js
+            "/.dayjs/", "\\.dayjs\\",           // Day.js
+            "/.date-fns/", "\\.date-fns\\",     // date-fns
+            "/.ramda/", "\\.ramda\\",           // Ramda
+            "/.immutable/", "\\.immutable\\",   // Immutable.js
+            "/.rxjs/", "\\.rxjs\\",             // RxJS
+            "/.redux/", "\\.redux\\",           // Redux
+            "/.mobx/", "\\.mobx\\",             // MobX
+            "/.zustand/", "\\.zustand\\",       // Zustand
+            "/.recoil/", "\\.recoil\\",         // Recoil
+            "/.jotai/", "\\.jotai\\",           // Jotai
+            "/.valtio/", "\\.valtio\\",         // Valtio
+            "/.swr/", "\\.swr\\",               // SWR
+            "/.react-query/", "\\.react-query\\", // React Query
+            "/.apollo/", "\\.apollo\\",         // Apollo
+            "/.relay/", "\\.relay\\",           // Relay
+            "/.graphql/", "\\.graphql\\",       // GraphQL
+            "/.prisma/", "\\.prisma\\",         // Prisma
+            "/.typeorm/", "\\.typeorm\\",       // TypeORM
+            "/.sequelize/", "\\.sequelize\\",   // Sequelize
+            "/.mongoose/", "\\.mongoose\\",     // Mongoose
+            "/.firebase/", "\\.firebase\\",     // Firebase
+            "/.supabase/", "\\.supabase\\",     // Supabase
+            "/.aws/", "\\.aws\\",               // AWS
+            "/.azure/", "\\.azure\\",           // Azure
+            "/.gcp/", "\\.gcp\\",               // Google Cloud
+            "/.docker/", "\\.docker\\",         // Docker
+            "/.kubernetes/", "\\.kubernetes\\", // Kubernetes
+            "/.helm/", "\\.helm\\",             // Helm
+            "/.terraform/", "\\.terraform\\",   // Terraform
+            "/.ansible/", "\\.ansible\\",       // Ansible
+            "/.vagrant/", "\\.vagrant\\",       // Vagrant
+            "/.chef/", "\\.chef\\",             // Chef
+            "/.puppet/", "\\.puppet\\",         // Puppet
+            "/.salt/", "\\.salt\\",             // Salt
+            "/.consul/", "\\.consul\\",         // Consul
+            "/.vault/", "\\.vault\\",           // Vault
+            "/.nomad/", "\\.nomad\\",           // Nomad
+            "/.traefik/", "\\.traefik\\",       // Traefik
+            "/.nginx/", "\\.nginx\\",           // Nginx
+            "/.apache/", "\\.apache\\",         // Apache
+            "/.caddy/", "\\.caddy\\",           // Caddy
+            "/.envoy/", "\\.envoy\\",           // Envoy
+            "/.istio/", "\\.istio\\",           // Istio
+            "/.linkerd/", "\\.linkerd\\",       // Linkerd
+            "/.consul/", "\\.consul\\",         // Consul
+            "/.etcd/", "\\.etcd\\",             // etcd
+            "/.zookeeper/", "\\.zookeeper\\",   // ZooKeeper
+            "/.kafka/", "\\.kafka\\",           // Kafka
+            "/.rabbitmq/", "\\.rabbitmq\\",     // RabbitMQ
+            "/.redis/", "\\.redis\\",           // Redis
+            "/.memcached/", "\\.memcached\\",   // Memcached
+            "/.elasticsearch/", "\\.elasticsearch\\", // Elasticsearch
+            "/.solr/", "\\.solr\\",             // Solr
+            "/.lucene/", "\\.lucene\\",         // Lucene
+            "/.opensearch/", "\\.opensearch\\", // OpenSearch
+            "/.mongodb/", "\\.mongodb\\",       // MongoDB
+            "/.postgresql/", "\\.postgresql\\", // PostgreSQL
+            "/.mysql/", "\\.mysql\\",           // MySQL
+            "/.sqlite/", "\\.sqlite\\",         // SQLite
+            "/.mariadb/", "\\.mariadb\\",       // MariaDB
+            "/.cassandra/", "\\.cassandra\\",   // Cassandra
+            "/.couchdb/", "\\.couchdb\\",       // CouchDB
+            "/.neo4j/", "\\.neo4j\\",           // Neo4j
+            "/.influxdb/", "\\.influxdb\\",     // InfluxDB
+            "/.timescaledb/", "\\.timescaledb\\", // TimescaleDB
+            "/.clickhouse/", "\\.clickhouse\\", // ClickHouse
+            "/.snowflake/", "\\.snowflake\\",   // Snowflake
+            "/.bigquery/", "\\.bigquery\\",     // BigQuery
+            "/.redshift/", "\\.redshift\\",     // Redshift
+            "/.databricks/", "\\.databricks\\", // Databricks
+            "/.spark/", "\\.spark\\",           // Spark
+            "/.hadoop/", "\\.hadoop\\",         // Hadoop
+            "/.hive/", "\\.hive\\",             // Hive
+            "/.pig/", "\\.pig\\",               // Pig
+            "/.sqoop/", "\\.sqoop\\",           // Sqoop
+            "/.flume/", "\\.flume\\",           // Flume
+            "/.kafka/", "\\.kafka\\",           // Kafka
+            "/.storm/", "\\.storm\\",           // Storm
+            "/.flink/", "\\.flink\\",           // Flink
+            "/.beam/", "\\.beam\\",             // Beam
+            "/.airflow/", "\\.airflow\\",       // Airflow
+            "/.luigi/", "\\.luigi\\",           // Luigi
+            "/.prefect/", "\\.prefect\\",       // Prefect
+            "/.dagster/", "\\.dagster\\",       // Dagster
+            "/.kubeflow/", "\\.kubeflow\\",     // Kubeflow
+            "/.mlflow/", "\\.mlflow\\",         // MLflow
+            "/.wandb/", "\\.wandb\\",           // Weights & Biases
+            "/.tensorboard/", "\\.tensorboard\\", // TensorBoard
+            "/.jupyter/", "\\.jupyter\\",       // Jupyter
+            "/.colab/", "\\.colab\\",           // Colab
+            "/.kaggle/", "\\.kaggle\\",         // Kaggle
+            "/.pytorch/", "\\.pytorch\\",       // PyTorch
+            "/.tensorflow/", "\\.tensorflow\\", // TensorFlow
+            "/.keras/", "\\.keras\\",           // Keras
+            "/.scikit/", "\\.scikit\\",         // Scikit-learn
+            "/.pandas/", "\\.pandas\\",         // Pandas
+            "/.numpy/", "\\.numpy\\",           // NumPy
+            "/.scipy/", "\\.scipy\\",           // SciPy
+            "/.matplotlib/", "\\.matplotlib\\", // Matplotlib
+            "/.seaborn/", "\\.seaborn\\",       // Seaborn
+            "/.plotly/", "\\.plotly\\",         // Plotly
+            "/.bokeh/", "\\.bokeh\\",           // Bokeh
+            "/.altair/", "\\.altair\\",         // Altair
+            "/.dash/", "\\.dash\\",             // Dash
+            "/.streamlit/", "\\.streamlit\\",   // Streamlit
+            "/.gradio/", "\\.gradio\\",         // Gradio
+            "/.fastapi/", "\\.fastapi\\",       // FastAPI
+            "/.flask/", "\\.flask\\",           // Flask
+            "/.django/", "\\.django\\",         // Django
+            "/.rails/", "\\.rails\\",           // Rails
+            "/.sinatra/", "\\.sinatra\\",       // Sinatra
+            "/.express/", "\\.express\\",       // Express
+            "/.koa/", "\\.koa\\",               // Koa
+            "/.hapi/", "\\.hapi\\",             // Hapi
+            "/.sails/", "\\.sails\\",           // Sails
+            "/.meteor/", "\\.meteor\\",         // Meteor
+            "/.svelte/", "\\.svelte\\",         // Svelte
+            "/.sapper/", "\\.sapper\\",         // Sapper
+            "/.kit/", "\\.kit\\",               // SvelteKit
+            "/.solid/", "\\.solid\\",           // Solid
+            "/.qwik/", "\\.qwik\\",             // Qwik
+            "/.lit/", "\\.lit\\",               // Lit
+            "/.stencil/", "\\.stencil\\",       // Stencil
+            "/.polymer/", "\\.polymer\\",       // Polymer
+            "/.aurelia/", "\\.aurelia\\",       // Aurelia
+            "/.mithril/", "\\.mithril\\",       // Mithril
+            "/.hyperapp/", "\\.hyperapp\\",     // Hyperapp
+            "/.inferno/", "\\.inferno\\",       // Inferno
+            "/.preact/", "\\.preact\\",         // Preact
+            "/.riot/", "\\.riot\\",             // Riot
+            "/.marko/", "\\.marko\\",           // Marko
+            "/.mithril/", "\\.mithril\\",       // Mithril
+            "/.cycle/", "\\.cycle\\",           // Cycle.js
+            "/.elm/", "\\.elm\\",               // Elm
+            "/.purescript/", "\\.purescript\\", // PureScript
+            "/.reason/", "\\.reason\\",         // Reason
+            "/.ocaml/", "\\.ocaml\\",           // OCaml
+            "/.haskell/", "\\.haskell\\",       // Haskell
+            "/.clojure/", "\\.clojure\\",       // Clojure
+            "/.clojurescript/", "\\.clojurescript\\", // ClojureScript
+            "/.fsharp/", "\\.fsharp\\",         // F#
+            "/.scala/", "\\.scala\\",           // Scala
+            "/.kotlin/", "\\.kotlin\\",         // Kotlin
+            "/.groovy/", "\\.groovy\\",         // Groovy
+            "/.grails/", "\\.grails\\",         // Grails
+            "/.play/", "\\.play\\",             // Play Framework
+            "/.spring/", "\\.spring\\",         // Spring
+            "/.hibernate/", "\\.hibernate\\",   // Hibernate
+            "/.mybatis/", "\\.mybatis\\",       // MyBatis
+            "/.jpa/", "\\.jpa\\",               // JPA
+            "/.jdbc/", "\\.jdbc\\",             // JDBC
+            "/.junit/", "\\.junit\\",           // JUnit
+            "/.testng/", "\\.testng\\",         // TestNG
+            "/.mockito/", "\\.mockito\\",       // Mockito
+            "/.powermock/", "\\.powermock\\",   // PowerMock
+            "/.easymock/", "\\.easymock\\",     // EasyMock
+            "/.jmock/", "\\.jmock\\",           // JMock
+            "/.wiremock/", "\\.wiremock\\",     // WireMock
+            "/.rest-assured/", "\\.rest-assured\\", // REST Assured
+            "/.selenium/", "\\.selenium\\",     // Selenium
+            "/.webdriver/", "\\.webdriver\\",   // WebDriver
+            "/.appium/", "\\.appium\\",         // Appium
+            "/.calabash/", "\\.calabash\\",     // Calabash
+            "/.espresso/", "\\.espresso\\",     // Espresso
+            "/.ui-automator/", "\\.ui-automator\\", // UI Automator
+            "/.xcuitest/", "\\.xcuitest\\",     // XCUITest
+            "/.detox/", "\\.detox\\",           // Detox
+            "/.maestro/", "\\.maestro\\",       // Maestro
+            "/.flutter/", "\\.flutter\\",       // Flutter
+            "/.dart/", "\\.dart\\",             // Dart
+            "/.ionic/", "\\.ionic\\",           // Ionic
+            "/.cordova/", "\\.cordova\\",       // Cordova
+            "/.phonegap/", "\\.phonegap\\",     // PhoneGap
+            "/.capacitor/", "\\.capacitor\\",   // Capacitor
+            "/.electron/", "\\.electron\\",     // Electron
+            "/.tauri/", "\\.tauri\\",           // Tauri
+            "/.neutralino/", "\\.neutralino\\", // Neutralino
+            "/.wails/", "\\.wails\\",           // Wails
+            "/.nwjs/", "\\.nwjs\\",             // NW.js
+            "/.cef/", "\\.cef\\",               // CEF
+            "/.webview/", "\\.webview\\",       // WebView
+            "/.webkit/", "\\.webkit\\",         // WebKit
+            "/.blink/", "\\.blink\\",           // Blink
+            "/.gecko/", "\\.gecko\\",           // Gecko
+            "/.trident/", "\\.trident\\",       // Trident
+            "/.edgehtml/", "\\.edgehtml\\",     // EdgeHTML
+            "/.chromium/", "\\.chromium\\",     // Chromium
+            "/.v8/", "\\.v8\\",                 // V8
+            "/.spidermonkey/", "\\.spidermonkey\\", // SpiderMonkey
+            "/.javascriptcore/", "\\.javascriptcore\\", // JavaScriptCore
+            "/.chakra/", "\\.chakra\\",         // Chakra
+            "/.hermes/", "\\.hermes\\",         // Hermes
+            "/.quickjs/", "\\.quickjs\\",       // QuickJS
+            "/.duktape/", "\\.duktape\\",       // Duktape
+            "/.jerryscript/", "\\.jerryscript\\", // JerryScript
+            "/.mujs/", "\\.mujs\\",             // MuJS
+            "/.tinyjs/", "\\.tinyjs\\",         // TinyJS
+            "/.nashorn/", "\\.nashorn\\",       // Nashorn
+            "/.graal/", "\\.graal\\",           // GraalVM
+            "/.truffle/", "\\.truffle\\",       // Truffle
+            "/.ganache/", "\\.ganache\\",       // Ganache
+            "/.hardhat/", "\\.hardhat\\",       // Hardhat
+            "/.foundry/", "\\.foundry\\",       // Foundry
+            "/.brownie/", "\\.brownie\\",       // Brownie
+            "/.embark/", "\\.embark\\",         // Embark
+            "/.dapp/", "\\.dapp\\",             // DApp
+            "/.web3/", "\\.web3\\",             // Web3
+            "/.ethers/", "\\.ethers\\",         // Ethers
+            "/.wagmi/", "\\.wagmi\\",           // Wagmi
+            "/.rainbow/", "\\.rainbow\\",       // Rainbow
+            "/.metamask/", "\\.metamask\\",     // MetaMask
+            "/.walletconnect/", "\\.walletconnect\\", // WalletConnect
+            "/.coinbase/", "\\.coinbase\\",     // Coinbase
+            "/.binance/", "\\.binance\\",       // Binance
+            "/.kraken/", "\\.kraken\\",         // Kraken
+            "/.bitfinex/", "\\.bitfinex\\",     // Bitfinex
+            "/.huobi/", "\\.huobi\\",           // Huobi
+            "/.okex/", "\\.okex\\",             // OKEx
+            "/.bybit/", "\\.bybit\\",           // Bybit
+            "/.ftx/", "\\.ftx\\",               // FTX
+            "/.crypto/", "\\.crypto\\",         // Crypto
+            "/.bitcoin/", "\\.bitcoin\\",       // Bitcoin
+            "/.ethereum/", "\\.ethereum\\",     // Ethereum
+            "/.solana/", "\\.solana\\",         // Solana
+            "/.polygon/", "\\.polygon\\",       // Polygon
+            "/.avalanche/", "\\.avalanche\\",   // Avalanche
+            "/.fantom/", "\\.fantom\\",         // Fantom
+            "/.bsc/", "\\.bsc\\",               // BSC
+            "/.arbitrum/", "\\.arbitrum\\",     // Arbitrum
+            "/.optimism/", "\\.optimism\\",     // Optimism
+            "/.base/", "\\.base\\",             // Base
+            "/.zksync/", "\\.zksync\\",         // zkSync
+            "/.starknet/", "\\.starknet\\",     // StarkNet
+            "/.near/", "\\.near\\",             // NEAR
+            "/.algorand/", "\\.algorand\\",     // Algorand
+            "/.cardano/", "\\.cardano\\",       // Cardano
+            "/.polkadot/", "\\.polkadot\\",     // Polkadot
+            "/.kusama/", "\\.kusama\\",         // Kusama
+            "/.cosmos/", "\\.cosmos\\",         // Cosmos
+            "/.tendermint/", "\\.tendermint\\", // Tendermint
+            "/.substrate/", "\\.substrate\\",   // Substrate
+            "/.ink/", "\\.ink\\",               // Ink!
+            "/.wasm/", "\\.wasm\\",             // WebAssembly
+            "/.wasmtime/", "\\.wasmtime\\",     // Wasmtime
+            "/.wasmer/", "\\.wasmer\\",         // Wasmer
+            "/.wasm3/", "\\.wasm3\\",           // Wasm3
+            "/.wamr/", "\\.wamr\\",             // WAMR
+            "/.wasm-bindgen/", "\\.wasm-bindgen\\", // wasm-bindgen
+            "/.wasm-pack/", "\\.wasm-pack\\",   // wasm-pack
+            "/.emscripten/", "\\.emscripten\\", // Emscripten
+            "/.binaryen/", "\\.binaryen\\",     // Binaryen
+            "/.wabt/", "\\.wabt\\",             // WABT
+            "/.wat/", "\\.wat\\",               // WAT
+            "/.wit/", "\\.wit\\",               // WIT
+            "/.witx/", "\\.witx\\",             // WITX
+            "/.wasm-opt/", "\\.wasm-opt\\",     // wasm-opt
+            "/.wasm-ld/", "\\.wasm-ld\\",       // wasm-ld
+            "/.wasm-as/", "\\.wasm-as\\",       // wasm-as
+            "/.wasm-dis/", "\\.wasm-dis\\",     // wasm-dis
+            "/.wasm-validate/", "\\.wasm-validate\\", // wasm-validate
+            "/.wasm-strip/", "\\.wasm-strip\\", // wasm-strip
+            "/.wasm-merge/", "\\.wasm-merge\\", // wasm-merge
+            "/.wasm-split/", "\\.wasm-split\\", // wasm-split
+            "/.wasm-dce/", "\\.wasm-dce\\",     // wasm-dce
+            "/.wasm-gc/", "\\.wasm-gc\\",       // wasm-gc
+            "/.wasm-shrink/", "\\.wasm-shrink\\", // wasm-shrink
+            "/.wasm-opt/", "\\.wasm-opt\\",     // wasm-opt
+            "/.wasm-ld/", "\\.wasm-ld\\",       // wasm-ld
+            "/.wasm-as/", "\\.wasm-as\\",       // wasm-as
+            "/.wasm-dis/", "\\.wasm-dis\\",     // wasm-dis
+            "/.wasm-validate/", "\\.wasm-validate\\", // wasm-validate
+            "/.wasm-strip/", "\\.wasm-strip\\", // wasm-strip
+            "/.wasm-merge/", "\\.wasm-merge\\", // wasm-merge
+            "/.wasm-split/", "\\.wasm-split\\", // wasm-split
+            "/.wasm-dce/", "\\.wasm-dce\\",     // wasm-dce
+            "/.wasm-gc/", "\\.wasm-gc\\",       // wasm-gc
+            "/.wasm-shrink/", "\\.wasm-shrink\\" // wasm-shrink
+        ]
+        
+        for pattern in dependencyPatterns {
+            if path.contains(pattern) {
+                print("[IncrementalIndexer] Excluding dependency file: \(path)")
+                return true
+            }
+        }
+        
+        // Exclude any path containing .git
+        if path.contains("/.git/") || path.contains("\\.git\\") {
+            print("[IncrementalIndexer] Excluding git file: \(path)")
+            return true
+        }
+        
+        // Exclude any path containing build directories
+        if path.contains("/build/") || path.contains("\\build\\") || path.contains("/dist/") || path.contains("\\dist\\") {
+            print("[IncrementalIndexer] Excluding build/dist file: \(path)")
+            return true
+        }
+        
+        // Exclude Next.js build artifacts
+        if path.contains("/.next/") || path.contains("\\.next\\") {
+            print("[IncrementalIndexer] Excluding Next.js build file: \(path)")
+            return true
+        }
+        
+        // Exclude webpack hot-update files
+        if fileName.contains("webpack.hot-update") || fileName.contains(".hot-update.") {
+            print("[IncrementalIndexer] Excluding webpack hot-update file: \(path)")
+            return true
+        }
+        
+        // Exclude other build artifacts
+        if path.contains("/out/") || path.contains("\\out\\") || path.contains("/.nuxt/") || path.contains("\\.nuxt\\") {
+            print("[IncrementalIndexer] Excluding build artifact file: \(path)")
+            return true
+        }
+        
+        // Exclude any path containing cache directories
+        if path.contains("/__pycache__/") || path.contains("\\__pycache__\\") || path.contains("/.cache/") || path.contains("\\.cache\\") {
+            print("[IncrementalIndexer] Excluding cache file: \(path)")
+            return true
+        }
+        
+        // Exclude any path containing IDE settings
+        if path.contains("/.vscode/") || path.contains("\\.vscode\\") || path.contains("/.idea/") || path.contains("\\.idea\\") {
+            print("[IncrementalIndexer] Excluding IDE file: \(path)")
+            return true
+        }
+        
+        // Exclude any path containing test coverage
+        if path.contains("/coverage/") || path.contains("\\coverage\\") || path.contains("/.coverage") || path.contains("\\.coverage") {
+            print("[IncrementalIndexer] Excluding coverage file: \(path)")
+            return true
+        }
+        
+        // Exclude any path containing temporary files
+        if path.contains("/tmp/") || path.contains("\\tmp\\") || path.contains("/temp/") || path.contains("\\temp\\") {
+            print("[IncrementalIndexer] Excluding temp file: \(path)")
+            return true
+        }
+        
+        // Exclude common third-party library patterns
+        if path.contains("/lib/") || path.contains("\\lib\\") || path.contains("/libs/") || path.contains("\\libs\\") {
+            print("[IncrementalIndexer] Excluding library file: \(path)")
+            return true
+        }
+        
+        // Exclude common third-party library file patterns
+        if fileName.hasSuffix(".h") && (fileName.contains("Util") || fileName.contains("Helper") || fileName.contains("Common")) {
+            print("[IncrementalIndexer] Excluding utility library file: \(path)")
+            return true
+        }
+        
+        // Exclude Python __init__.py files in library directories
+        if fileName == "__init__.py" && (path.contains("/lib/") || path.contains("\\lib\\") || path.contains("/site-packages/") || path.contains("\\site-packages\\")) {
+            print("[IncrementalIndexer] Excluding Python library __init__.py: \(path)")
+            return true
+        }
+        
+        // Exclude all __init__.py files (they're usually just package markers)
+        if fileName == "__init__.py" {
+            print("[IncrementalIndexer] Excluding __init__.py file: \(path)")
+            return true
+        }
+        
+        // Exclude common third-party C/C++ library files
+        if fileName.hasSuffix(".h") && (fileName.contains("dtoa") || fileName.contains("util") || fileName.contains("common") || fileName.contains("helper")) {
+            print("[IncrementalIndexer] Excluding C/C++ library file: \(path)")
+            return true
+        }
+        
+        // Exclude generic HTML files (loading pages, etc.)
+        if fileName == "index.html" && path.contains("Loading") {
+            print("[IncrementalIndexer] Excluding generic HTML file: \(path)")
+            return true
+        }
+        
+        // Exclude files with very generic content
+        if fileName == "index.html" && (path.contains("/static/") || path.contains("\\static\\") || path.contains("/public/") || path.contains("\\public\\")) {
+            print("[IncrementalIndexer] Excluding static HTML file: \(path)")
+            return true
+        }
+        
+        // Exclude specific file patterns
+        let excludedFilePatterns = [
+            "*.pyc",          // Python compiled files
+            "*.pyo",          // Python optimized files
+            "*.class",        // Java compiled files
+            "*.jar",          // Java archive files
+            "*.war",          // Web archive files
+            "*.ear",          // Enterprise archive files
+            "*.o",            // Object files
+            "*.so",           // Shared objects
+            "*.dylib",        // Dynamic libraries
+            "*.exe",          // Executable files
+            "*.dll",          // Dynamic link libraries
+            "*.bin",          // Binary files
+            "*.log",          // Log files (unless specifically needed)
+            "*.tmp",          // Temporary files
+            "*.temp",         // Temporary files
+            "*.swp",          // Vim swap files
+            "*.swo",          // Vim swap files
+            "*~",             // Backup files
+            "*.bak",          // Backup files
+            "*.orig",         // Original files
+            "*.rej"           // Rejected files
+        ]
+        
+        // Exclude specific dependency and lock files
+        let excludedDependencyFiles = [
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "requirements.txt",
+            "Pipfile.lock",
+            "poetry.lock",
+            "composer.lock",
+            "Gemfile.lock",
+            "Cargo.lock",
+            "go.sum",
+            "go.mod"
+        ]
+        
+        // Check for dependency files
+        if excludedDependencyFiles.contains(fileName) {
+            print("[IncrementalIndexer] Excluding dependency file: \(path)")
+            return true
+        }
+        
+        // Check file patterns (simplified pattern matching)
+        for pattern in excludedFilePatterns {
+            if fileName.matches(pattern: pattern) {
+                return true
+            }
+        }
+        
+        return false
+    }
+}
+
+// MARK: - String Pattern Matching Extension
+
+extension String {
+    func matches(pattern: String) -> Bool {
+        // Simple pattern matching for common wildcards
+        if pattern.hasPrefix("*") && pattern.hasSuffix("*") {
+            let innerPattern = String(pattern.dropFirst().dropLast())
+            return self.contains(innerPattern)
+        } else if pattern.hasPrefix("*") {
+            let suffix = String(pattern.dropFirst())
+            return self.hasSuffix(suffix)
+        } else if pattern.hasSuffix("*") {
+            let prefix = String(pattern.dropLast())
+            return self.hasPrefix(prefix)
+        } else {
+            return self == pattern
+        }
     }
 }
 

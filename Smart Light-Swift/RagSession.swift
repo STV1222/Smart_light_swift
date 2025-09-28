@@ -19,8 +19,9 @@ final class RagSession {
         
         do {
             // Use persistent embedding service for much better performance
+            print("[RagSession] Attempting to initialize persistent embedding service...")
             let persistent = try PersistentEmbeddingService(modelName: "google/embeddinggemma-300m")
-            print("[RagSession] Successfully initialized persistent embedding service for google/embeddinggemma-300m")
+            print("[RagSession] ✅ Successfully initialized persistent embedding service for google/embeddinggemma-300m")
             self.embedder = persistent
             // Create store with proper dimension
             self.store = InMemoryVectorStore(dimension: persistent.dimension)
@@ -28,19 +29,21 @@ final class RagSession {
             // Use incremental indexer for much faster processing
             self.indexer = IncrementalIndexer(embedder: persistent, store: self.store)
             self.engine = RagEngine(embedder: persistent, store: self.store)
+            print("[RagSession] ✅ Using PersistentEmbeddingService - optimized for large files")
         } catch {
-            print("[RagSession] Failed to initialize persistent embedding service: \(error)")
-            print("[RagSession] Falling back to local embedding service...")
+            print("[RagSession] ❌ Failed to initialize persistent embedding service: \(error)")
+            print("[RagSession] 🔄 Falling back to local embedding service...")
             // Fallback to local service if persistent fails
             do {
                 let local = try LocalEmbeddingService(modelName: "google/embeddinggemma-300m")
-                print("[RagSession] Successfully initialized local embedding service")
+                print("[RagSession] ✅ Successfully initialized local embedding service")
                 self.embedder = local
                 self.store = InMemoryVectorStore(dimension: local.dimension)
                 self.indexer = Indexer(embedder: local, store: self.store)
                 self.engine = RagEngine(embedder: local, store: self.store)
+                print("[RagSession] ⚠️ Using LocalEmbeddingService - may be slower for large files")
             } catch {
-                print("[RagSession] Failed to initialize local embedding service: \(error)")
+                print("[RagSession] ❌ Failed to initialize local embedding service: \(error)")
                 fatalError("Failed to initialize Gemma embeddings: \(error.localizedDescription)")
             }
         }

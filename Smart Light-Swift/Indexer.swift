@@ -32,8 +32,10 @@ final class Indexer {
             while let rel = (en?.nextObject() as? String) {
                 let path = (folder as NSString).appendingPathComponent(rel)
                 let ext = (rel as NSString).pathExtension.lowercased()
-                if supportedExts.contains(".\(ext)") {
+                if supportedExts.contains(".\(ext)") && !shouldExcludeFile(path: path) {
                     files.append(path)
+                } else if shouldExcludeFile(path: path) {
+                    print("[Indexer] Excluding file: \(path)")
                 }
             }
         }
@@ -145,6 +147,194 @@ final class Indexer {
         
         // Limit number of chunks per file (like Python version)
         return Array(chunks.prefix(200))
+    }
+    
+    // MARK: - Smart File Filtering
+    
+    private func shouldExcludeFile(path: String) -> Bool {
+        let fileName = (path as NSString).lastPathComponent
+        
+        // Exclude hidden files and directories
+        if fileName.hasPrefix(".") {
+            return true
+        }
+        
+        // Exclude any path containing virtual environment directories
+        if path.contains("/.venv") || path.contains("/venv") || path.contains("\\.venv") || path.contains("\\venv") {
+            return true
+        }
+        
+        // Exclude any path containing Python package directories
+        if path.contains("/site-packages/") || path.contains("\\site-packages\\") {
+            return true
+        }
+        
+        // Exclude any path containing node_modules
+        if path.contains("/node_modules/") || path.contains("\\node_modules\\") {
+            return true
+        }
+        
+        // Exclude iOS/mobile dependency directories
+        if path.contains("/Pods/") || path.contains("\\Pods\\") {
+            return true
+        }
+        
+        // Exclude other mobile dependency directories
+        if path.contains("/android/") || path.contains("\\android\\") || path.contains("/ios/") || path.contains("\\ios\\") {
+            return true
+        }
+        
+        // Exclude common dependency patterns (concise version)
+        let commonDependencyPatterns = [
+            "/vendor/", "/bower_components/", "/jspm_packages/", "/packages/",
+            "/external/", "/third_party/", "/third-party/", "/dependencies/", "/deps/",
+            "/libs/", "/libraries/", "/frameworks/", "/plugins/", "/extensions/",
+            "/assets/", "/static/", "/public/", "/resources/", "/media/", "/images/",
+            "/css/", "/js/", "/fonts/", "/docs/", "/documentation/", "/examples/",
+            "/tests/", "/test/", "/spec/", "/fixtures/", "/mocks/", "/stubs/",
+            "/cypress/", "/playwright/", "/jest/", "/mocha/", "/karma/", "/storybook/",
+            "/.docker/", "/.terraform/", "/.kubernetes/", "/.firebase/", "/.aws/"
+        ]
+        
+        for pattern in commonDependencyPatterns {
+            if path.contains(pattern) || path.contains(pattern.replacingOccurrences(of: "/", with: "\\")) {
+                return true
+            }
+        }
+        
+        // Exclude any path containing .git
+        if path.contains("/.git/") || path.contains("\\.git\\") {
+            return true
+        }
+        
+        // Exclude any path containing build directories
+        if path.contains("/build/") || path.contains("\\build\\") || path.contains("/dist/") || path.contains("\\dist\\") {
+            return true
+        }
+        
+        // Exclude Next.js build artifacts
+        if path.contains("/.next/") || path.contains("\\.next\\") {
+            return true
+        }
+        
+        // Exclude webpack hot-update files
+        if fileName.contains("webpack.hot-update") || fileName.contains(".hot-update.") {
+            return true
+        }
+        
+        // Exclude other build artifacts
+        if path.contains("/out/") || path.contains("\\out\\") || path.contains("/.nuxt/") || path.contains("\\.nuxt\\") {
+            return true
+        }
+        
+        // Exclude any path containing cache directories
+        if path.contains("/__pycache__/") || path.contains("\\__pycache__\\") || path.contains("/.cache/") || path.contains("\\.cache\\") {
+            return true
+        }
+        
+        // Exclude any path containing IDE settings
+        if path.contains("/.vscode/") || path.contains("\\.vscode\\") || path.contains("/.idea/") || path.contains("\\.idea\\") {
+            return true
+        }
+        
+        // Exclude any path containing test coverage
+        if path.contains("/coverage/") || path.contains("\\coverage\\") || path.contains("/.coverage") || path.contains("\\.coverage") {
+            return true
+        }
+        
+        // Exclude any path containing temporary files
+        if path.contains("/tmp/") || path.contains("\\tmp\\") || path.contains("/temp/") || path.contains("\\temp\\") {
+            return true
+        }
+        
+        // Exclude common third-party library patterns
+        if path.contains("/lib/") || path.contains("\\lib\\") || path.contains("/libs/") || path.contains("\\libs\\") {
+            return true
+        }
+        
+        // Exclude common third-party library file patterns
+        if fileName.hasSuffix(".h") && (fileName.contains("Util") || fileName.contains("Helper") || fileName.contains("Common")) {
+            return true
+        }
+        
+        // Exclude Python __init__.py files in library directories
+        if fileName == "__init__.py" && (path.contains("/lib/") || path.contains("\\lib\\") || path.contains("/site-packages/") || path.contains("\\site-packages\\")) {
+            return true
+        }
+        
+        // Exclude all __init__.py files (they're usually just package markers)
+        if fileName == "__init__.py" {
+            return true
+        }
+        
+        // Exclude common third-party C/C++ library files
+        if fileName.hasSuffix(".h") && (fileName.contains("dtoa") || fileName.contains("util") || fileName.contains("common") || fileName.contains("helper")) {
+            return true
+        }
+        
+        // Exclude generic HTML files (loading pages, etc.)
+        if fileName == "index.html" && path.contains("Loading") {
+            return true
+        }
+        
+        // Exclude files with very generic content
+        if fileName == "index.html" && (path.contains("/static/") || path.contains("\\static\\") || path.contains("/public/") || path.contains("\\public\\")) {
+            return true
+        }
+        
+        // Exclude specific file patterns
+        let excludedFilePatterns = [
+            "*.pyc",          // Python compiled files
+            "*.pyo",          // Python optimized files
+            "*.class",        // Java compiled files
+            "*.jar",          // Java archive files
+            "*.war",          // Web archive files
+            "*.ear",          // Enterprise archive files
+            "*.o",            // Object files
+            "*.so",           // Shared objects
+            "*.dylib",        // Dynamic libraries
+            "*.exe",          // Executable files
+            "*.dll",          // Dynamic link libraries
+            "*.bin",          // Binary files
+            "*.log",          // Log files (unless specifically needed)
+            "*.tmp",          // Temporary files
+            "*.temp",         // Temporary files
+            "*.swp",          // Vim swap files
+            "*.swo",          // Vim swap files
+            "*~",             // Backup files
+            "*.bak",          // Backup files
+            "*.orig",         // Original files
+            "*.rej"           // Rejected files
+        ]
+        
+        // Exclude specific dependency and lock files
+        let excludedDependencyFiles = [
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+            "requirements.txt",
+            "Pipfile.lock",
+            "poetry.lock",
+            "composer.lock",
+            "Gemfile.lock",
+            "Cargo.lock",
+            "go.sum",
+            "go.mod"
+        ]
+        
+        // Check for dependency files
+        if excludedDependencyFiles.contains(fileName) {
+            return true
+        }
+        
+        // Check file patterns (simplified pattern matching)
+        for pattern in excludedFilePatterns {
+            if fileName.matches(pattern: pattern) {
+                return true
+            }
+        }
+        
+        return false
     }
 }
 

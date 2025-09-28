@@ -256,9 +256,36 @@ enum AppPage {
 struct ChatPageView: View {
     @ObservedObject var vm: ChatViewModel
     @Binding var currentPage: AppPage
+    @StateObject private var statusManager = IndexingStatusManager.shared
 
     var body: some View {
         VStack(spacing: 0) {
+            // STATUS BAR
+            if statusManager.chunks > 0 {
+                HStack {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .foregroundColor(.blue)
+                        .font(.system(size: 12))
+                    
+                    Text(statusManager.statusDescription)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+                    
+                    Spacer()
+                    
+                    if let lastIndexed = statusManager.lastIndexedDate {
+                        Text("Updated \(formatDate(lastIndexed))")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.regularMaterial.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+            }
+            
             // TOP INPUT
             HStack(spacing: 8) {
                 TextField("Ask AI anything...", text: $vm.input, axis: .vertical)
@@ -349,7 +376,16 @@ struct ChatPageView: View {
                 }
             }
             #endif
+            
+            // Update status when returning to chat page
+            statusManager.updateStatus()
         }
+    }
+    
+    private func formatDate(_ date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 
@@ -357,6 +393,7 @@ struct ChatPageView: View {
 struct SettingsPageView: View {
     @Binding var currentPage: AppPage
     @State private var selectedTab: SettingsTab = .general
+    @StateObject private var statusManager = IndexingStatusManager.shared
     
     var body: some View {
         HStack(spacing: 0) {
@@ -625,8 +662,7 @@ struct AISettingsView: View {
 }
 
 struct IndexingSettingsView: View {
-    @State private var chunks = 0
-    @State private var foldersIndexed: [String] = []
+    @StateObject private var statusManager = IndexingStatusManager.shared
     @State private var indexing = false
     @State private var showProgress = false
     @State private var progress = 0.0
@@ -645,10 +681,10 @@ struct IndexingSettingsView: View {
                     description: "Indexed chunks and folders",
                     content: {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("\(chunks) chunks indexed")
+                            Text("\(statusManager.chunks) chunks indexed")
                                 .font(.system(size: 14, weight: .medium))
-                            if !foldersIndexed.isEmpty {
-                                Text("Folders: \(foldersIndexed.count)")
+                            if !statusManager.foldersIndexed.isEmpty {
+                                Text("Folders: \(statusManager.foldersIndexed.count)")
                                     .font(.system(size: 12))
                                     .foregroundColor(.secondary)
                             }
@@ -691,6 +727,10 @@ struct IndexingSettingsView: View {
                     }
                 }
             }
+        }
+        .onAppear {
+            // Update status when settings page appears
+            statusManager.updateStatus()
         }
     }
     
@@ -767,8 +807,9 @@ struct IndexingSettingsView: View {
                     }
                 } else {
                     DispatchQueue.main.async {
-                        self.chunks = RagSession.shared.getStoreCount()
-                        self.foldersIndexed = folders
+                        // Update shared status manager
+                        self.statusManager.updateFromNewIndexing(folders: folders)
+                        
                         self.indexing = false
                         self.progress = 1.0
                         self.progressStage = "Complete!"

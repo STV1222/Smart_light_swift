@@ -101,6 +101,13 @@ except Exception as e:
     
     func embed(texts: [String], asQuery: Bool = false, progress: ((Double) -> Void)? = nil) throws -> [[Float]] {
         print("[LocalEmbeddingService] Embedding \(texts.count) texts (asQuery: \(asQuery))")
+        
+        // For large batches, process in smaller chunks to prevent timeouts
+        if texts.count > 20 {
+            print("[LocalEmbeddingService] Large batch detected (\(texts.count) texts), processing in chunks of 10")
+            return try embedLargeBatch(texts: texts, asQuery: asQuery, progress: progress)
+        }
+        
         let process = Process()
         
         // Use the project's Python environment
@@ -166,13 +173,13 @@ except Exception as e:
             inputPipe.fileHandleForWriting.write(inputData)
             inputPipe.fileHandleForWriting.closeFile()
             
-            // Add timeout to prevent hanging
-            let timeout = 60.0 // 60 seconds timeout
+            // Add timeout to prevent hanging - longer timeout for large files
+            let timeout = texts.count > 10 ? 300.0 : 120.0 // 5 minutes for large batches, 2 minutes for normal
             let startTime = Date()
             while process.isRunning {
                 if Date().timeIntervalSince(startTime) > timeout {
                     process.terminate()
-                    throw NSError(domain: "Embedding", code: -7, userInfo: [NSLocalizedDescriptionKey: "Python script timed out after \(timeout) seconds"])
+                    throw NSError(domain: "Embedding", code: -6, userInfo: [NSLocalizedDescriptionKey: "Failed to run Python script: Python script timed out after \(timeout) seconds"])
                 }
                 Thread.sleep(forTimeInterval: 0.1)
             }
@@ -219,6 +226,32 @@ except Exception as e:
         } catch {
             throw NSError(domain: "Embedding", code: -6, userInfo: [NSLocalizedDescriptionKey: "Failed to run Python script: \(error.localizedDescription)"])
         }
+    }
+    
+    private func embedLargeBatch(texts: [String], asQuery: Bool, progress: ((Double) -> Void)?) throws -> [[Float]] {
+        let chunkSize = 10
+        var allEmbeddings: [[Float]] = []
+        let totalChunks = (texts.count + chunkSize - 1) / chunkSize
+        
+        for i in stride(from: 0, to: texts.count, by: chunkSize) {
+            let endIndex = min(i + chunkSize, texts.count)
+            let chunk = Array(texts[i..<endIndex])
+            let chunkNumber = i / chunkSize + 1
+            
+            print("[LocalEmbeddingService] Processing chunk \(chunkNumber)/\(totalChunks) with \(chunk.count) texts")
+            
+            let chunkEmbeddings = try embed(texts: chunk, asQuery: asQuery, progress: nil)
+            allEmbeddings.append(contentsOf: chunkEmbeddings)
+            
+            // Update progress
+            let chunkProgress = Double(chunkNumber) / Double(totalChunks)
+            progress?(chunkProgress)
+            
+            print("[LocalEmbeddingService] ✅ Completed chunk \(chunkNumber)/\(totalChunks)")
+        }
+        
+        print("[LocalEmbeddingService] ✅ Completed large batch processing: \(allEmbeddings.count) total embeddings")
+        return allEmbeddings
     }
     
     private func parseDotEnv(_ content: String) -> [String: String]? {

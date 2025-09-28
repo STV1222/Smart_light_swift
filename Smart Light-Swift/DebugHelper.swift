@@ -52,31 +52,26 @@ final class DebugHelper {
     static func testRagSession() {
         print("🔍 [Debug] Testing RagSession...")
         
-        do {
-            RagSession.shared.initialize(embeddingBackend: "gemma")
-            print("✅ [Debug] RagSession initialized successfully")
+        RagSession.shared.initialize(embeddingBackend: "gemma")
+        print("✅ [Debug] RagSession initialized successfully")
+        
+        if let engine = RagSession.shared.engine {
+            print("✅ [Debug] RAG Engine available")
             
-            if let engine = RagSession.shared.engine {
-                print("✅ [Debug] RAG Engine available")
-                
-                // Test a simple question
-                let question = "What files do you have access to?"
-                print("🔍 [Debug] Testing question: \(question)")
-                
-                Task {
-                    do {
-                        let answer = try await engine.answer(question: question)
-                        print("✅ [Debug] RAG Engine answer: \(answer)")
-                    } catch {
-                        print("❌ [Debug] RAG Engine failed: \(error)")
-                    }
+            // Test a simple question
+            let question = "What files do you have access to?"
+            print("🔍 [Debug] Testing question: \(question)")
+            
+            Task {
+                do {
+                    let answer = try await engine.answer(question: question)
+                    print("✅ [Debug] RAG Engine answer: \(answer)")
+                } catch {
+                    print("❌ [Debug] RAG Engine failed: \(error)")
                 }
-            } else {
-                print("❌ [Debug] RAG Engine not available")
             }
-            
-        } catch {
-            print("❌ [Debug] RagSession failed: \(error)")
+        } else {
+            print("❌ [Debug] RAG Engine not available")
         }
     }
     
