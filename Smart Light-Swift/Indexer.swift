@@ -329,7 +329,7 @@ final class Indexer {
         
         // Check file patterns (simplified pattern matching)
         for pattern in excludedFilePatterns {
-            if fileName.matches(pattern: pattern) {
+            if fileName.contains(pattern) {
                 return true
             }
         }
