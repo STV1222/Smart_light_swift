@@ -465,20 +465,14 @@ class PythonIndexerService {
                 return changed
 
             def index_file(self, path, force_reindex=False):
-                print(f"index_file called for: {path}", file=sys.stderr)
                 ensure_dirs()
                 ext = os.path.splitext(path)[1].lower()
-                print(f"File extension: {ext}", file=sys.stderr)
                 if (not INDEX_ALL_FILE_TYPES) and (ext not in SUPPORTED_EXTS):
-                    print(f"File type not supported: {ext}", file=sys.stderr)
                     return {"added": 0, "deleted": 0}
                 try:
-                    print(f"Getting file stats for: {path}", file=sys.stderr)
                     st = os.stat(path)
                     mtime_iso = datetime.fromtimestamp(st.st_mtime).isoformat()
-                    print(f"File stats: size={st.st_size}, mtime={mtime_iso}", file=sys.stderr)
-                except Exception as e:
-                    print(f"Error getting file stats: {e}", file=sys.stderr)
+                except Exception:
                     return {"added": 0, "deleted": 0}
 
                 try:
@@ -498,7 +492,6 @@ class PythonIndexerService {
 
                 deleted = self._soft_delete_path(path)
 
-                print(f"About to load text from file: {path}", file=sys.stderr)
                 full_text, paged = load_text_from_file(path)
                 print(f"Loaded text from {path}: {len(full_text)} chars, paged: {paged is not None}", file=sys.stderr)
                 if not full_text.strip():
@@ -602,10 +595,6 @@ class PythonIndexerService {
                                     for fn in filenames:
                                         if fn.startswith('.'):
                                             continue
-                                        # Skip temporary Word files
-                                        if fn.startswith('~$'):
-                                            print(f"Skipping temporary file: {fn}", file=sys.stderr)
-                                            continue
                                         path = os.path.join(dirpath, fn)
                                         if INDEX_ALL_FILE_TYPES:
                                             file_list.append(path)
@@ -632,39 +621,18 @@ class PythonIndexerService {
                     except Exception as e:
                         print(f"Warning: Progress callback error: {e}", file=sys.stderr)
 
-                    # Process files with comprehensive error handling and timeout
+                    # Process files with comprehensive error handling
                     for path in file_list:
                         try:
-                            print(f"Starting to process file: {path}", file=sys.stderr)
-                            
-                            # Add timeout for individual file processing
-                            import signal
-                            import time
-                            
-                            def timeout_handler(signum, frame):
-                                raise TimeoutError(f"File processing timeout: {path}")
-                            
-                            # Set 30 second timeout for each file
-                            signal.signal(signal.SIGALRM, timeout_handler)
-                            signal.alarm(30)
-                            
-                            try:
-                                res = self.index_file(path, force_reindex=force_reindex)
-                                print(f"Completed processing file: {path}, result: {res}", file=sys.stderr)
-                                added += res.get("added", 0)
-                                deleted += res.get("deleted", 0)
-                            finally:
-                                signal.alarm(0)  # Cancel timeout
-                                
-                        except TimeoutError as e:
-                            print(f"TIMEOUT: {e}", file=sys.stderr)
+                            res = self.index_file(path, force_reindex=force_reindex)
+                            added += res.get("added", 0)
+                            deleted += res.get("deleted", 0)
                         except Exception as e:
-                            print(f"ERROR: Failed to process file {path}: {e}", file=sys.stderr)
+                            print(f"Warning: Error indexing file {path}: {e}", file=sys.stderr)
                             if traceback:
                                 traceback.print_exc()
                         finally:
                             processed += 1
-                            print(f"File {processed}/{total} processed: {path}", file=sys.stderr)
                             try:
                                 if progress_cb:
                                     progress_cb(processed, total, path)
@@ -1013,7 +981,7 @@ class PythonIndexerService {
         }
         
         guard let process = pythonProcess, process.isRunning,
-              let inputPipe = inputPipe, let outputPipe = outputPipe else {
+              let inputPipe = inputPipe, let outputPipe = outputPipe, let errorPipe = errorPipe else {
             throw NSError(domain: "PythonIndexer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Python process not running"])
         }
         
@@ -1031,28 +999,45 @@ class PythonIndexerService {
         
         // Send request (add newline for line-by-line reading)
         let requestWithNewline = requestString + "\n"
-        inputPipe.fileHandleForWriting.write(requestWithNewline.data(using: String.Encoding.utf8)!)
+        inputPipe.fileHandleForWriting.write(requestWithNewline.data(using: .utf8)!)
         
-        // Read response line by line
+        // Start a background thread to read and print stderr during indexing
+        let stderrQueue = DispatchQueue(label: "com.pythonindexer.stderr")
+        stderrQueue.async {
+            while self.isProcessRunning {
+                let data = errorPipe.fileHandleForReading.availableData
+                if !data.isEmpty {
+                    if let str = String(data: data, encoding: .utf8) {
+                        print("[PythonIndexerService] Python stderr during indexing: \(str.trimmingCharacters(in: .whitespacesAndNewlines))")
+                    }
+                }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+        
+        // Read response line by line incrementally
         let startTime = Date()
-        var responseData = Data()
-        let timeout = 300.0 // 5 minute timeout for indexing
+        var buffer = ""
+        let timeout = 300.0 // 5 minute timeout for indexing, consider increasing if needed
         
         while Date().timeIntervalSince(startTime) < timeout {
             let data = outputPipe.fileHandleForReading.availableData
             if !data.isEmpty {
-                responseData.append(data)
-                if let responseString = String(data: responseData, encoding: .utf8) {
-                    let lines = responseString.components(separatedBy: .newlines).filter { !$0.isEmpty }
-                    
-                    // Look for progress updates and final result
+                if let newString = String(data: data, encoding: .utf8) {
+                    buffer += newString
+                    var lines = buffer.components(separatedBy: "\n")
+                    if !newString.hasSuffix("\n") {
+                        buffer = lines.popLast() ?? ""
+                    } else {
+                        buffer = ""
+                    }
                     for line in lines {
-                        if let lineData = line.data(using: .utf8),
+                        let trimmed = line.trimmingCharacters(in: .whitespaces)
+                        if trimmed.isEmpty { continue }
+                        if let lineData = trimmed.data(using: .utf8),
                            let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
-                            
                             if let type = json["type"] as? String {
                                 if type == "progress" {
-                                    // Handle progress update
                                     if let processed = json["processed"] as? Int,
                                        let total = json["total"] as? Int,
                                        let currentPath = json["current_path"] as? String {
@@ -1060,7 +1045,6 @@ class PythonIndexerService {
                                         progress?(progressValue, currentPath)
                                     }
                                 } else if type == "result" {
-                                    // This is the final result
                                     if let success = json["success"] as? Bool, success,
                                        let data = json["data"] as? [String: Any] {
                                         print("[PythonIndexerService] Received final result: \(data)")
