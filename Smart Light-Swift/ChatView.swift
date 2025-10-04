@@ -434,8 +434,9 @@ struct SettingsPageView: View {
                     
                     SettingsTabButton(
                         title: "AI",
-                        icon: "brain.head.profile",
-                        isSelected: selectedTab == .ai
+                        icon: "logo3",
+                        isSelected: selectedTab == .ai,
+                        isAppIcon: true
                     ) {
                         selectedTab = .ai
                     }
@@ -516,15 +517,32 @@ struct SettingsTabButton: View {
     let title: String
     let icon: String
     let isSelected: Bool
+    let isAppIcon: Bool
     let action: () -> Void
+    
+    init(title: String, icon: String, isSelected: Bool, isAppIcon: Bool = false, action: @escaping () -> Void) {
+        self.title = title
+        self.icon = icon
+        self.isSelected = isSelected
+        self.isAppIcon = isAppIcon
+        self.action = action
+    }
     
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(isSelected ? .blue : .secondary)
-                    .frame(width: 20)
+                if isAppIcon {
+                    Image(icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 20, height: 20)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                } else {
+                    Image(systemName: icon)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(isSelected ? .blue : .secondary)
+                        .frame(width: 20)
+                }
                 
                 Text(title)
                     .font(.system(size: 14, weight: .medium))
@@ -703,6 +721,31 @@ struct IndexingSettingsView: View {
                     }
                 )
                 
+                SettingsRow(
+                    title: "Clear Index",
+                    description: "Remove all indexed data to start fresh",
+                    content: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button("Clear All Index Data") {
+                                Task { await clearIndex() }
+                            }
+                            .buttonStyle(.bordered)
+                            .foregroundColor(.red)
+                            .disabled(indexing || statusManager.chunks == 0)
+                            
+                            if statusManager.chunks > 0 {
+                                Text("\(statusManager.chunks) chunks will be removed")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                            } else {
+                                Text("No data to clear")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                )
+                
                 if showProgress {
                     VStack(alignment: .leading, spacing: 8) {
                         ProgressView(value: progress, total: 1.0) {
@@ -818,10 +861,60 @@ struct IndexingSettingsView: View {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.indexing = false
-                    self.progress = 0
-                    self.progressStage = "Error"
-                    self.showProgress = false
+                    // Check if this is a cancellation error
+                    if let nsError = error as NSError?, nsError.code == -999 {
+                        self.handleIndexingCancellation()
+                    } else {
+                        self.indexing = false
+                        self.progress = 0
+                        self.progressStage = "Error"
+                        self.showProgress = false
+                    }
+                }
+                print("Indexing failed: \(error)")
+            }
+        }
+    }
+    
+    @MainActor
+    private func clearIndex() async {
+        // Show confirmation dialog
+        let alert = NSAlert()
+        alert.messageText = "Clear All Index Data"
+        alert.informativeText = "This will permanently remove all indexed data (\(statusManager.chunks) chunks). You will need to re-index folders to search documents again. This action cannot be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Clear All Data")
+        alert.addButton(withTitle: "Cancel")
+        
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        
+        // Perform clearing on background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try RagSession.shared.clearIndex()
+                
+                DispatchQueue.main.async {
+                    // Update status manager
+                    statusManager.updateStatus()
+                    
+                    // Show success message
+                    let successAlert = NSAlert()
+                    successAlert.messageText = "Index Cleared"
+                    successAlert.informativeText = "All indexed data has been successfully removed."
+                    successAlert.alertStyle = .informational
+                    successAlert.addButton(withTitle: "OK")
+                    successAlert.runModal()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    // Show error message
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = "Failed to Clear Index"
+                    errorAlert.informativeText = "An error occurred while clearing the index: \(error.localizedDescription)"
+                    errorAlert.alertStyle = .critical
+                    errorAlert.addButton(withTitle: "OK")
+                    errorAlert.runModal()
                 }
             }
         }
@@ -833,6 +926,11 @@ struct IndexingSettingsView: View {
         progress = 0
         progressStage = "Cancelled"
         cancelIndexing = false
+        
+        // Update status manager to reflect cancellation
+        statusManager.updateStatus()
+        
+        print("[IndexingSettingsView] 🛑 Indexing cancelled by user")
     }
 }
 
@@ -853,15 +951,12 @@ struct AccountSettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     // User profile section
                     HStack(spacing: 16) {
-                        // Profile avatar
-                        Circle()
-                            .fill(.blue.gradient)
+                        // App icon as profile avatar
+                        Image("logo3")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
                             .frame(width: 64, height: 64)
-                            .overlay(
-                                Text(userName.prefix(1).uppercased())
-                                    .font(.system(size: 24, weight: .bold))
-                                    .foregroundColor(.white)
-                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
                         
                         VStack(alignment: .leading, spacing: 4) {
                             Text(userName)
@@ -951,14 +1046,11 @@ struct AccountSettingsView: View {
                     // Get Started section
                     HStack(spacing: 16) {
                         // App logo
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(.blue.gradient)
+                        Image("logo3")
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
                             .frame(width: 64, height: 64)
-                            .overlay(
-                                Image(systemName: "brain.head.profile")
-                                    .font(.system(size: 32))
-                                    .foregroundColor(.white)
-                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
                         
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Get Started")
@@ -1165,15 +1257,12 @@ struct AboutSettingsView: View {
             
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 16) {
-                    // App icon placeholder
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(.blue.gradient)
+                    // App icon
+                    Image("logo3")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
                         .frame(width: 64, height: 64)
-                        .overlay(
-                            Image(systemName: "brain.head.profile")
-                                .font(.system(size: 32))
-                                .foregroundColor(.white)
-                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Smart Light")

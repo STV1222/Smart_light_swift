@@ -30,6 +30,9 @@ final class RagSession {
             self.indexer = IncrementalIndexer(embedder: persistent, store: self.store)
             self.engine = RagEngine(embedder: persistent, store: self.store)
             print("[RagSession] ✅ Using PersistentEmbeddingService - optimized for large files")
+            
+            // Try to load existing indexed data
+            loadExistingData()
         } catch {
             print("[RagSession] ❌ Failed to initialize persistent embedding service: \(error)")
             print("[RagSession] 🔄 Falling back to local embedding service...")
@@ -54,8 +57,38 @@ final class RagSession {
         store.reset()
     }
     
+    func clearIndex() throws {
+        print("[RagSession] Clearing all indexed data...")
+        
+        // Clear the Swift store
+        store.reset()
+        
+        // Clear the Python indexer data if using IncrementalIndexer
+        if let indexer = indexer as? IncrementalIndexer {
+            try indexer.clearIndex()
+        }
+        
+        print("[RagSession] ✅ All indexed data cleared")
+    }
+    
     func getStoreCount() -> Int {
         return store.count
+    }
+    
+    private func loadExistingData() {
+        guard let indexer = indexer as? IncrementalIndexer else {
+            print("[RagSession] Not using IncrementalIndexer, skipping data load")
+            return
+        }
+        
+        print("[RagSession] Attempting to load existing indexed data...")
+        do {
+            try indexer.loadDataFromPythonIndexer()
+            print("[RagSession] ✅ Successfully loaded existing data: \(store.count) chunks")
+        } catch {
+            print("[RagSession] ⚠️ Could not load existing data: \(error)")
+            print("[RagSession] This is normal if no data has been indexed yet")
+        }
     }
 }
 

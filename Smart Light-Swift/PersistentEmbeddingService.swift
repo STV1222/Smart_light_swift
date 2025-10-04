@@ -451,15 +451,17 @@ except Exception as e:
             if let output = String(data: data, encoding: .utf8), !output.isEmpty {
                 allOutput += output
                 print("[PersistentEmbeddingService] Python stderr: \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-                
-                if output.contains("READY") {
+            }
+            
+            // Check accumulated output, not just current chunk
+            if allOutput.contains("READY") {
                 print("[PersistentEmbeddingService] Process is ready")
                 return
-                } else if output.contains("FAILED") {
-                    print("[PersistentEmbeddingService] Python process reported failure")
-                    throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "Python process failed to initialize"])
-                }
+            } else if allOutput.contains("FAILED") {
+                print("[PersistentEmbeddingService] Python process reported failure")
+                throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "Python process failed to initialize"])
             }
+            
             Thread.sleep(forTimeInterval: 0.1)
         }
         
@@ -627,6 +629,8 @@ except Exception as e:
         let startTime = Date()
         var outputData = Data()
         var isComplete = false
+        var expectedLength: Int? = nil
+        var headerRead = false
         
         print("[PersistentEmbeddingService] Waiting for single text response...")
         
@@ -635,37 +639,83 @@ except Exception as e:
             if !availableData.isEmpty {
                 outputData.append(availableData)
                 print("[PersistentEmbeddingService] Received \(availableData.count) bytes, total: \(outputData.count) bytes")
+            }
+            
+            // First, read the length header (4 bytes, big-endian)
+            if !headerRead && outputData.count >= 4 {
+                let headerData = outputData.prefix(4)
+                let lengthBytes = [UInt8](headerData)
+                let calculatedLength = Int(lengthBytes[0]) << 24 | Int(lengthBytes[1]) << 16 | Int(lengthBytes[2]) << 8 | Int(lengthBytes[3])
                 
-                // Try to parse JSON response
-                if let outputString = String(data: outputData, encoding: .utf8) {
-                    if outputString.hasPrefix("[") && (outputString.hasSuffix("]") || outputString.hasSuffix("]\n")) {
-                        if let jsonData = try? JSONSerialization.jsonObject(with: outputData) as? [[Float]] {
-                            if let firstEmbedding = jsonData.first {
-                                print("[PersistentEmbeddingService] ✅ Single text embedding received (dim: \(firstEmbedding.count))")
-                                isComplete = true
-                                return firstEmbedding
-                            }
-                        }
-                    }
+                if calculatedLength > 0 && calculatedLength <= 10_000_000 {
+                    expectedLength = calculatedLength
+                    outputData = Data(outputData.dropFirst(4)) // Remove header from data
+                    headerRead = true
+                    print("[PersistentEmbeddingService] Expected response length: \(expectedLength ?? 0) bytes")
                 }
-            } else {
-                // Check timeout
-                if Date().timeIntervalSince(startTime) > timeout {
-                    print("[PersistentEmbeddingService] Timeout waiting for single text response")
+            }
+            
+            // If we have the header and enough data, we have a complete response
+            if let expectedLen = expectedLength {
+                if outputData.count >= expectedLen {
+                    outputData = Data(outputData.prefix(expectedLen)) // Truncate to expected length
+                    print("[PersistentEmbeddingService] Complete response received (\(outputData.count) bytes)")
+                    isComplete = true
                     break
                 }
             }
+            
+            // Check timeout
+            if Date().timeIntervalSince(startTime) > timeout {
+                print("[PersistentEmbeddingService] Timeout waiting for single text response")
+                break
+            }
+            
             Thread.sleep(forTimeInterval: 0.1)
         }
         
-        // If we get here, something went wrong
-        if retryCount < 2 {
-            print("[PersistentEmbeddingService] Retrying single text processing (attempt \(retryCount + 1))")
-            Thread.sleep(forTimeInterval: 1.0) // Wait before retry
-            return try processSingleText(text, asQuery: asQuery, retryCount: retryCount + 1)
+        // Parse the JSON response
+        guard !outputData.isEmpty else {
+            if retryCount < 2 {
+                print("[PersistentEmbeddingService] No data received, retrying (attempt \(retryCount + 1))")
+                Thread.sleep(forTimeInterval: 1.0)
+                return try processSingleText(text, asQuery: asQuery, retryCount: retryCount + 1)
+            }
+            throw NSError(domain: "Embedding", code: -2, userInfo: [NSLocalizedDescriptionKey: "No response from embedding process"])
         }
         
-        throw NSError(domain: "Embedding", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to get response for single text after retries"])
+        do {
+            let result = try JSONSerialization.jsonObject(with: outputData)
+            
+            // Check for error response
+            if let errorDict = result as? [String: Any], let error = errorDict["error"] as? String {
+                throw NSError(domain: "Embedding", code: -3, userInfo: [NSLocalizedDescriptionKey: "Embedding error: \(error)"])
+            }
+            
+            // Parse embeddings
+            if let embeddings = result as? [[Double]] {
+                if let firstEmbedding = embeddings.first {
+                    print("[PersistentEmbeddingService] ✅ Single text embedding received (dim: \(firstEmbedding.count))")
+                    return firstEmbedding.map { Float($0) }
+                }
+            } else if let embeddings = result as? [[NSNumber]] {
+                if let firstEmbedding = embeddings.first {
+                    print("[PersistentEmbeddingService] ✅ Single text embedding received (dim: \(firstEmbedding.count))")
+                    return firstEmbedding.map { $0.floatValue }
+                }
+            }
+            
+            throw NSError(domain: "Embedding", code: -4, userInfo: [NSLocalizedDescriptionKey: "Unexpected embedding response format"])
+            
+        } catch {
+            print("[PersistentEmbeddingService] JSON parsing failed: \(error)")
+            if retryCount < 2 {
+                print("[PersistentEmbeddingService] Retrying single text processing (attempt \(retryCount + 1))")
+                Thread.sleep(forTimeInterval: 1.0)
+                return try processSingleText(text, asQuery: asQuery, retryCount: retryCount + 1)
+            }
+            throw error
+        }
     }
     
     

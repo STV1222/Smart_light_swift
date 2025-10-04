@@ -98,6 +98,33 @@ struct SettingsView: View {
                     }
                 }
             }
+            
+            Section("Clear Index") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Remove all indexed data to start fresh")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    
+                    HStack {
+                        Button("Clear All Index Data") {
+                            Task { await clearIndex() }
+                        }
+                        .buttonStyle(.bordered)
+                        .foregroundColor(.red)
+                        .disabled(indexing || chunks == 0)
+                        
+                        if chunks > 0 {
+                            Text("\(chunks) chunks will be removed")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("No data to clear")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
         }
         .onAppear {
             Task { await refreshStatus() }
@@ -236,6 +263,51 @@ struct SettingsView: View {
     private func refreshStatus() async {
         // Local-only: read from in-memory store
         chunks = self.store?.count ?? 0
+    }
+    
+    @MainActor
+    private func clearIndex() async {
+        // Show confirmation dialog
+        let alert = NSAlert()
+        alert.messageText = "Clear All Index Data"
+        alert.informativeText = "This will permanently remove all indexed data (\(chunks) chunks). You will need to re-index folders to search documents again. This action cannot be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Clear All Data")
+        alert.addButton(withTitle: "Cancel")
+        
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        
+        // Perform clearing on background thread
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try RagSession.shared.clearIndex()
+                
+                DispatchQueue.main.async {
+                    // Update UI
+                    self.chunks = 0
+                    self.foldersIndexed = []
+                    
+                    // Show success message
+                    let successAlert = NSAlert()
+                    successAlert.messageText = "Index Cleared"
+                    successAlert.informativeText = "All indexed data has been successfully removed."
+                    successAlert.alertStyle = .informational
+                    successAlert.addButton(withTitle: "OK")
+                    successAlert.runModal()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    // Show error message
+                    let errorAlert = NSAlert()
+                    errorAlert.messageText = "Failed to Clear Index"
+                    errorAlert.informativeText = "An error occurred while clearing the index: \(error.localizedDescription)"
+                    errorAlert.alertStyle = .critical
+                    errorAlert.addButton(withTitle: "OK")
+                    errorAlert.runModal()
+                }
+            }
+        }
     }
 }
 // MARK: - Private helpers

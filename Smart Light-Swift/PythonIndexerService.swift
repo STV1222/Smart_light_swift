@@ -27,6 +27,7 @@ class PythonIndexerService {
         import json
         import time
         import hashlib
+        import signal
         
         # Set thread safety environment variables before importing anything else
         os.environ['OMP_NUM_THREADS'] = '1'
@@ -142,6 +143,10 @@ class PythonIndexerService {
                     return ("\\n\\n".join(t for _, t in pages), pages)
                 if ext == ".docx":
                     print(f"Processing DOCX file: {path}", file=sys.stderr)
+                    # Skip temporary Word files
+                    if os.path.basename(path).startswith('~$'):
+                        print(f"Skipping temporary Word file: {path}", file=sys.stderr)
+                        return ("", None)
                     try:
                         import docx
                         print(f"docx imported successfully", file=sys.stderr)
@@ -385,6 +390,7 @@ class PythonIndexerService {
                     for i in range(0, len(texts), batch_size):
                         batch_texts = texts[i:i + batch_size]
                         print(f"Processing batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size} with {len(batch_texts)} texts", file=sys.stderr)
+                        print(f"Batch text lengths: {[len(t) for t in batch_texts]}", file=sys.stderr)
                         
                         # Use local embeddings via sentence-transformers
                         model = self._lazy_local_embedder()
@@ -469,6 +475,13 @@ class PythonIndexerService {
                 ext = os.path.splitext(path)[1].lower()
                 if (not INDEX_ALL_FILE_TYPES) and (ext not in SUPPORTED_EXTS):
                     return {"added": 0, "deleted": 0}
+                
+                # Skip temporary files
+                filename = os.path.basename(path)
+                if filename.startswith('~$') or filename.startswith('.~'):
+                    print(f"Skipping temporary file: {path}", file=sys.stderr)
+                    return {"added": 0, "deleted": 0}
+                
                 try:
                     st = os.stat(path)
                     mtime_iso = datetime.fromtimestamp(st.st_mtime).isoformat()
@@ -537,6 +550,7 @@ class PythonIndexerService {
                     return {"added": 0, "deleted": deleted}
 
                 print(f"About to embed {len(texts)} texts for {path}", file=sys.stderr)
+                print(f"Text lengths: {[len(t) for t in texts[:3]]}...", file=sys.stderr)  # Show first 3 text lengths
                 try:
                     vecs = self._embed(texts)
                     print(f"Successfully embedded {len(texts)} texts, shape: {vecs.shape}", file=sys.stderr)
@@ -571,6 +585,13 @@ class PythonIndexerService {
 
                     result = {"added": len(texts), "deleted": deleted}
                     print(f"Returning result for {path}: {result}", file=sys.stderr)
+                    
+                    # Reset timeout after successful file processing
+                    try:
+                        signal.alarm(1800)
+                    except:
+                        pass  # Ignore if signal is not available
+                    
                     return result
                 except Exception as e:
                     print(f"Error processing {path}: {e}", file=sys.stderr)
@@ -594,6 +615,11 @@ class PythonIndexerService {
                                     dirnames[:] = [d for d in dirnames if not d.startswith('.') and not any(x in d for x in excludes)]
                                     for fn in filenames:
                                         if fn.startswith('.'):
+                                            continue
+                                        # Skip temporary files and other excluded patterns
+                                        if any(fn.startswith(pattern.replace('*', '')) for pattern in excludes if '*' in pattern):
+                                            continue
+                                        if any(pattern in fn for pattern in excludes if '*' not in pattern):
                                             continue
                                         path = os.path.join(dirpath, fn)
                                         if INDEX_ALL_FILE_TYPES:
@@ -658,15 +684,14 @@ class PythonIndexerService {
                 print("READY signal sent", file=sys.stderr)
                 
                 # Read input from stdin line by line with timeout
-                import signal
                 
                 def timeout_handler(signum, frame):
                     print("Timeout reached, exiting gracefully", file=sys.stderr)
                     sys.exit(0)
                 
-                # Set timeout to 10 minutes
+                # Set timeout to 30 minutes for large files
                 signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(600)
+                signal.alarm(1800)
                 
                 try:
                     for line in sys.stdin:
@@ -679,6 +704,12 @@ class PythonIndexerService {
                             action = input_data.get("action")
                             
                             if action == "index_folders":
+                                # Reset timeout for new indexing operation
+                                try:
+                                    signal.alarm(1800)  # Reset to 30 minutes
+                                except:
+                                    pass  # Ignore if signal is not available
+                                
                                 folders = input_data.get("folders", [])
                                 excludes = input_data.get("excludes", [])
                                 replace = input_data.get("replace", False)
@@ -806,6 +837,106 @@ class PythonIndexerService {
                                     }
                                     print(json.dumps(error_result), flush=True)
                                 
+                            elif action == "clear_index":
+                                try:
+                                    # Clear all index files
+                                    cleared_files = []
+                                    for path in [FAISS_PATH, META_PATH, MANIFEST_PATH]:
+                                        try:
+                                            if os.path.exists(path):
+                                                os.remove(path)
+                                                cleared_files.append(path)
+                                        except Exception as e:
+                                            print(f"Warning: Could not remove {path}: {e}", file=sys.stderr)
+                                    
+                                    result = {
+                                        "type": "result",
+                                        "success": True,
+                                        "data": {
+                                            "cleared_files": cleared_files,
+                                            "message": f"Cleared {len(cleared_files)} index files"
+                                        }
+                                    }
+                                    print(json.dumps(result), flush=True)
+                                    
+                                except Exception as e:
+                                    error_result = {
+                                        "type": "result",
+                                        "success": False,
+                                        "error": f"Failed to clear index: {str(e)}"
+                                    }
+                                    print(json.dumps(error_result), flush=True)
+                                
+                            elif action == "get_embeddings":
+                                try:
+                                    if not os.path.isfile(FAISS_PATH) or not os.path.isfile(META_PATH):
+                                        error_result = {
+                                            "type": "result",
+                                            "success": False,
+                                            "error": "No index found"
+                                        }
+                                        print(json.dumps(error_result), flush=True)
+                                        continue
+                                    
+                                    # Load FAISS index and metadata
+                                    idx = RAGIndex()
+                                    idx._lazy_index()
+                                    
+                                    if idx.index is None or idx.size == 0:
+                                        error_result = {
+                                            "type": "result",
+                                            "success": False,
+                                            "error": "Empty index"
+                                        }
+                                        print(json.dumps(error_result), flush=True)
+                                        continue
+                                    
+                                    # Read metadata
+                                    embeddings_data = []
+                                    with open(META_PATH, "r", encoding="utf-8") as f:
+                                        for line in f:
+                                            try:
+                                                obj = json.loads(line.strip())
+                                                if not obj.get("deleted", False):
+                                                    embeddings_data.append({
+                                                        "id": obj.get("id"),
+                                                        "path": obj.get("path"),
+                                                        "text": obj.get("text"),
+                                                        "page": obj.get("page")
+                                                    })
+                                            except Exception:
+                                                continue
+                                    
+                                    # Get embeddings from FAISS index
+                                    if HAVE_FAISS and idx.index is not None:
+                                        # Get all vectors from FAISS index
+                                        vectors = idx.index.reconstruct_n(0, idx.size)
+                                        vectors_list = vectors.tolist()
+                                        
+                                        # Match embeddings with metadata
+                                        for i, meta in enumerate(embeddings_data):
+                                            if i < len(vectors_list):
+                                                meta["embedding"] = vectors_list[i]
+                                    
+                                    result = {
+                                        "type": "result",
+                                        "success": True,
+                                        "data": {
+                                            "embeddings": embeddings_data,
+                                            "dimension": idx.dim,
+                                            "count": len(embeddings_data)
+                                        }
+                                    }
+                                    print(json.dumps(result), flush=True)
+                                    
+                                except Exception as e:
+                                    error_result = {
+                                        "type": "result",
+                                        "success": False,
+                                        "error": f"Failed to get embeddings: {str(e)}"
+                                    }
+                                    print(json.dumps(error_result), flush=True)
+                                
                             else:
                                 error_result = {
                                     "type": "result",
@@ -927,11 +1058,13 @@ class PythonIndexerService {
                 if let output = String(data: stdoutData, encoding: .utf8) {
                     allOutput += output
                     print("[PythonIndexerService] Python stdout: \(output.trimmingCharacters(in: .whitespacesAndNewlines))")
-                    if output.contains("READY") {
-                        print("[PythonIndexerService] Python indexer is ready (from stdout)")
-                        return
-                    }
                 }
+            }
+            
+            // Check accumulated output, not just current chunk
+            if allOutput.contains("READY") {
+                print("[PythonIndexerService] Python indexer is ready")
+                return
             }
             
             // Check if we haven't received any output for too long
@@ -1018,11 +1151,15 @@ class PythonIndexerService {
         // Read response line by line incrementally
         let startTime = Date()
         var buffer = ""
-        let timeout = 300.0 // 5 minute timeout for indexing, consider increasing if needed
+        let timeout = 1800.0 // 30 minute timeout for indexing to match Python script timeout
+        
+        var lastProgressTime = startTime
+        var lastProgressValue = 0.0
         
         while Date().timeIntervalSince(startTime) < timeout {
             let data = outputPipe.fileHandleForReading.availableData
             if !data.isEmpty {
+                lastProgressTime = Date() // Reset progress timer when we get data
                 if let newString = String(data: data, encoding: .utf8) {
                     buffer += newString
                     var lines = buffer.components(separatedBy: "\n")
@@ -1042,6 +1179,7 @@ class PythonIndexerService {
                                        let total = json["total"] as? Int,
                                        let currentPath = json["current_path"] as? String {
                                         let progressValue = total > 0 ? Double(processed) / Double(total) : 0.0
+                                        lastProgressValue = progressValue
                                         progress?(progressValue, currentPath)
                                     }
                                 } else if type == "result" {
@@ -1056,6 +1194,13 @@ class PythonIndexerService {
                             }
                         }
                     }
+                }
+            } else {
+                // Check if we've been waiting too long without progress
+                let timeSinceLastProgress = Date().timeIntervalSince(lastProgressTime)
+                if timeSinceLastProgress > 60.0 { // 1 minute without progress
+                    let elapsed = Date().timeIntervalSince(startTime)
+                    print("[PythonIndexerService] ⚠️ No progress for \(Int(timeSinceLastProgress))s (total elapsed: \(Int(elapsed))s, progress: \(Int(lastProgressValue * 100))%)")
                 }
             }
             Thread.sleep(forTimeInterval: 0.1)
@@ -1087,6 +1232,62 @@ class PythonIndexerService {
               let success = json["success"] as? Bool, success,
               let result = json["data"] as? [String: Any] else {
             throw NSError(domain: "PythonIndexer", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to parse status response"])
+        }
+        
+        return result
+    }
+    
+    func getEmbeddings() throws -> [String: Any] {
+        guard let process = pythonProcess, process.isRunning,
+              let inputPipe = inputPipe, let outputPipe = outputPipe else {
+            throw NSError(domain: "PythonIndexer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Python process not running"])
+        }
+        
+        let request = ["action": "get_embeddings"]
+        let requestData = try JSONSerialization.data(withJSONObject: request)
+        let requestString = String(data: requestData, encoding: .utf8)!
+        
+        // Send request
+        inputPipe.fileHandleForWriting.write(requestString.data(using: .utf8)!)
+        inputPipe.fileHandleForWriting.closeFile()
+        
+        // Read response
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let outputString = String(data: outputData, encoding: .utf8) ?? ""
+        
+        guard let data = outputString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let success = json["success"] as? Bool, success,
+              let result = json["data"] as? [String: Any] else {
+            throw NSError(domain: "PythonIndexer", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to parse embeddings response"])
+        }
+        
+        return result
+    }
+    
+    func clearIndex() throws -> [String: Any] {
+        guard let process = pythonProcess, process.isRunning,
+              let inputPipe = inputPipe, let outputPipe = outputPipe else {
+            throw NSError(domain: "PythonIndexer", code: -1, userInfo: [NSLocalizedDescriptionKey: "Python process not running"])
+        }
+        
+        let request = ["action": "clear_index"]
+        let requestData = try JSONSerialization.data(withJSONObject: request)
+        let requestString = String(data: requestData, encoding: .utf8)!
+        
+        // Send request
+        inputPipe.fileHandleForWriting.write(requestString.data(using: .utf8)!)
+        inputPipe.fileHandleForWriting.closeFile()
+        
+        // Read response
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let outputString = String(data: outputData, encoding: .utf8) ?? ""
+        
+        guard let data = outputString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let success = json["success"] as? Bool, success,
+              let result = json["data"] as? [String: Any] else {
+            throw NSError(domain: "PythonIndexer", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to parse clear index response"])
         }
         
         return result
